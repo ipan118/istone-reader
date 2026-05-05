@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta
+      name="description"
+      content="iStone Reader 是一款支持 PDF、EPUB、TXT、MD 导入、章节导航和语音听读的 PWA 阅读工具。"
+    />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="iStone Reader" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <title>iStone Reader</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./assets/icon-180.png" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-one"></div>
+    <div class="ambient ambient-two"></div>
+    <div class="ambient ambient-three"></div>
+
+    <main class="app-shell">
+      <section class="hero-card glass-card">
+        <div class="hero-topline">
+          <span class="brand-badge">iStone Reader</span>
+          <span class="status-chip" id="status-chip">等待导入书籍</span>
+        </div>
+        <div class="hero-copy">
+          <p class="eyebrow">简单方便的听读体验</p>
+          <h1>iStone Reader</h1>
+          <p class="hero-description">
+            把 PDF、EPUB、TXT、MD 一键导入成会说话的章节书。支持多语音朗读、章节拆分、进度导航和沉浸式移动端界面。
+          </p>
+        </div>
+        <div class="hero-actions">
+          <label class="upload-button" for="book-file-input">导入书籍</label>
+          <button class="ghost-button" id="load-demo-button" type="button">加载演示书</button>
+          <a class="ghost-button" href="./test.html">测试页面</a>
+        </div>
+        <input
+          id="book-file-input"
+          class="visually-hidden"
+          type="file"
+          accept=".pdf,.epub,.txt,.md,.markdown"
+        />
+        <div class="support-row">
+          <span>PDF</span>
+          <span>EPUB</span>
+          <span>TXT</span>
+          <span>MD</span>
+          <span>章节导航</span>
+          <span>多语音</span>
+          <span>扫描 OCR</span>
+          <span>系统分享导入</span>
+          <span>色调调节</span>
+        </div>
+      </section>
+
+      <section class="control-grid">
+        <article class="glass-card panel-card book-card">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Book</p>
+              <h2>书籍概览</h2>
+            </div>
+            <span class="panel-pill" id="book-format-pill">未载入</span>
+          </div>
+          <div class="book-summary">
+            <h3 id="book-title">还没有打开书</h3>
+            <p id="book-subtitle">导入后会自动拆分章节并生成导航。</p>
+          </div>
+          <div class="metric-grid">
+            <div class="metric-tile">
+              <span class="metric-label">章节数</span>
+              <strong id="chapter-count">0</strong>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">总字数</span>
+              <strong id="char-count">0</strong>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">当前章节</span>
+              <strong id="current-chapter-metric">-</strong>
+            </div>
+            <div class="metric-tile">
+              <span class="metric-label">朗读句数</span>
+              <strong id="sentence-count">0</strong>
+            </div>
+          </div>
+          <div class="progress-cluster">
+            <div>
+              <div class="progress-label-row">
+                <span>全书进度</span>
+                <strong id="book-progress-text">0%</strong>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill gradient-fill" id="book-progress-fill"></div>
+              </div>
+            </div>
+          </div>
+        </article>
+
+        <article class="glass-card panel-card voice-card">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Voice Studio</p>
+              <h2>朗读控制</h2>
+            </div>
+            <span class="panel-pill" id="voice-ready-pill">等待语音</span>
+          </div>
+          <div class="listen-console">
+            <label class="field-block voice-select-block">
+              <span>语音选择</span>
+              <select id="voice-select"></select>
+            </label>
+            <div class="slider-stack speed-control-block">
+              <label class="field-block">
+                <div class="field-header">
+                  <span>语速</span>
+                  <strong id="rate-value">1.0x</strong>
+                </div>
+                <input id="rate-range" type="range" min="0.5" max="3.0" step="0.1" value="1" />
+              </label>
+              <p class="micro-helper">拖动后会立即应用到当前朗读句。</p>
+            </div>
+          </div>
+          <div class="control-button-row">
+            <button class="primary-button" id="speak-button" type="button">开始朗读</button>
+            <button class="ghost-button" id="pause-button" type="button">暂停 / 继续</button>
+            <button class="ghost-button" id="stop-button" type="button">停止</button>
+            <button class="ghost-button" id="voice-test-button" type="button">测试发声</button>
+          </div>
+          <p class="helper-text" id="voice-hint">
+            语音来自设备系统。不同手机或浏览器看到的可选声音会不同。
+          </p>
+          <div class="speech-diagnostic" id="speech-diagnostic" data-state="idle">
+            <strong id="speech-diagnostic-title">朗读自检：待测试</strong>
+            <p id="speech-diagnostic-text">如果没声音，这里会告诉你是浏览器限制、系统语音缺失，还是设备静音。</p>
+          </div>
+        </article>
+
+        <article class="glass-card panel-card studio-card">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">Tone & Scan</p>
+              <h2>色调与识别</h2>
+            </div>
+            <span class="panel-pill" id="tone-pill">霓虹夜航</span>
+          </div>
+          <div class="studio-split">
+            <section class="studio-block">
+              <div class="block-heading">
+                <strong>面板色调</strong>
+                <span>快速切换配色</span>
+              </div>
+              <div class="preset-grid">
+                <button class="tone-preset-button" type="button" data-tone-preset="dark">暗色</button>
+                <button class="tone-preset-button" type="button" data-tone-preset="light">浅色</button>
+              </div>
+              <p class="helper-text" id="tone-helper">
+                浅色适合长时间看屏，暗色适合夜间听读。
+              </p>
+            </section>
+
+            <section class="studio-block">
+              <div class="block-heading">
+                <strong>扫描版 PDF 识别</strong>
+                <span>对没有可复制文字的页面自动补识别</span>
+              </div>
+              <label class="field-block">
+                <span>识别模式</span>
+                <select id="ocr-mode-select">
+                  <option value="auto">自动识别扫描页</option>
+                  <option value="always">PDF 全页强制识别</option>
+                  <option value="off">关闭扫描识别</option>
+                </select>
+              </label>
+              <label class="field-block">
+                <span>识别语言</span>
+                <select id="ocr-language-select">
+                  <option value="eng">英文</option>
+                  <option value="eng+chi_sim">中英混合</option>
+                </select>
+              </label>
+              <p class="helper-text" id="ocr-helper">
+                扫描版 PDF 首次识别会更慢一些，因为需要准备识别引擎和文字模型。
+              </p>
+              <div class="format-guide">
+                <strong>识别类型建议</strong>
+                <p>推荐：可复制文字的 PDF、EPUB、TXT、Markdown，以及清晰、正放、单栏的扫描 PDF。</p>
+                <p>较困难：拍照歪斜、低分辨率、双栏排版、手写体、表格公式密集、水印严重、竖排古籍或中英混排很乱的扫描件。</p>
+              </div>
+            </section>
+          </div>
+        </article>
+      </section>
+
+      <section class="glass-card reader-card">
+        <div class="reader-topbar">
+          <div>
+            <p class="panel-kicker">Reader</p>
+            <h2 id="reader-section-title">请先导入一本书</h2>
+          </div>
+          <div class="reading-stat-row">
+            <span class="mini-pill" id="reader-format-pill">-</span>
+            <span class="mini-pill" id="section-label-pill">第 0 章</span>
+            <span class="mini-pill" id="reader-position-pill">0 / 0</span>
+          </div>
+        </div>
+        <div class="reader-dashboard">
+          <div class="field-header">
+            <span>听读看板</span>
+            <strong id="chapter-select-label">0 / 0</strong>
+          </div>
+          <label class="field-block reader-select-block">
+            <span>章节选择</span>
+            <select id="chapter-select"></select>
+          </label>
+          <div class="reader-dashboard-support visually-hidden" aria-hidden="true">
+            <div class="chapter-chip-list" id="chapter-chip-list"></div>
+            <strong id="position-range-label">0 / 0</strong>
+            <input id="position-range" type="range" min="0" max="0" step="1" value="0" />
+            <div class="jump-row" id="position-dot-row"></div>
+          </div>
+        </div>
+        <div class="reader-meta-row">
+          <span id="reader-source-hint">支持自动按章节拆分与回退分段。</span>
+          <span id="speech-state-hint">未开始朗读</span>
+        </div>
+        <div class="reader-body" id="reader-body">
+          <div class="empty-state">
+            <strong>导入文件后这里会显示正文。</strong>
+            <p>如果 PDF 无法识别出正式标题，系统会按页数和文本长度稳定分段，仍然可以导航和朗读。</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./vendor/jszip.min.js"></script>
+    <script src="./vendor/epub.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

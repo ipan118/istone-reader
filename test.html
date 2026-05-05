@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f5f7fb" />
+    <title>iStone Reader 测试页面</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <style>
+      :root {
+        color-scheme: light;
+        --bg:
+          radial-gradient(circle at 12% 10%, rgba(10, 109, 216, 0.12), transparent 30%),
+          linear-gradient(180deg, #f3f6fb, #ffffff);
+        --panel: rgba(255, 255, 255, 0.94);
+        --text: #172033;
+        --soft: #627188;
+        --line: #d8e2ee;
+        --blue: #0a6dd8;
+        --blue-soft: rgba(10, 109, 216, 0.08);
+        --ok: #0f8a50;
+        --warn: #a36600;
+        --bad: #b42318;
+        --shadow: 0 18px 40px rgba(23, 32, 51, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      main {
+        width: min(980px, calc(100% - 24px));
+        margin: 0 auto;
+        padding: max(20px, env(safe-area-inset-top)) 0 max(34px, env(safe-area-inset-bottom));
+        display: grid;
+        gap: 14px;
+      }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 16px;
+        box-shadow: var(--shadow);
+      }
+
+      .topbar,
+      .row,
+      .actions {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .topbar {
+        justify-content: space-between;
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      pre {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: clamp(1.9rem, 5vw, 2.8rem);
+      }
+
+      h2 {
+        font-size: 1.08rem;
+      }
+
+      h3 {
+        font-size: 0.96rem;
+      }
+
+      .muted {
+        color: var(--soft);
+        line-height: 1.6;
+      }
+
+      .button,
+      button,
+      select,
+      label.button {
+        border-radius: 12px;
+        font: inherit;
+      }
+
+      .button,
+      button,
+      label.button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 10px 14px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--text);
+        text-decoration: none;
+        cursor: pointer;
+      }
+
+      .primary {
+        background: var(--blue);
+        color: #fff;
+        border-color: var(--blue);
+      }
+
+      .grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .checks {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .check,
+      .note {
+        display: grid;
+        gap: 6px;
+        padding: 12px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: #fbfdff;
+      }
+
+      .check strong {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .status {
+        white-space: nowrap;
+      }
+
+      .ok {
+        color: var(--ok);
+      }
+
+      .warn {
+        color: var(--warn);
+      }
+
+      .bad {
+        color: var(--bad);
+      }
+
+      .field {
+        display: grid;
+        gap: 8px;
+      }
+
+      select,
+      pre {
+        width: 100%;
+      }
+
+      select {
+        min-height: 48px;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--text);
+      }
+
+      input[type="file"] {
+        display: none;
+      }
+
+      pre {
+        padding: 12px;
+        max-height: 260px;
+        overflow: auto;
+        background: #101726;
+        color: #e5eefc;
+        border-radius: 14px;
+        font-size: 0.86rem;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .banner {
+        padding: 14px;
+        border-radius: 14px;
+        background: var(--blue-soft);
+        border: 1px solid rgba(10, 109, 216, 0.14);
+      }
+
+      .banner strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      @media (max-width: 700px), (hover: none) and (pointer: coarse) {
+        main {
+          width: min(100%, calc(100% - 16px));
+          padding-top: max(12px, env(safe-area-inset-top));
+        }
+
+        .topbar,
+        .row,
+        .actions {
+          align-items: stretch;
+        }
+
+        .checks {
+          grid-template-columns: 1fr;
+        }
+
+        .button,
+        button,
+        label.button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="card topbar">
+        <div class="grid">
+          <p class="muted">iStone Reader</p>
+          <h1>本地测试页面</h1>
+          <p class="muted">用于确认手机当前浏览器是否适合 OCR、语音朗读、PWA 安装和文件导入。</p>
+        </div>
+        <div class="actions">
+          <a class="button primary" href="./">返回阅读器</a>
+          <button id="run-tests" type="button">重新检测</button>
+        </div>
+      </section>
+
+      <section class="card banner" id="mobile-guidance">
+        <strong>手机建议</strong>
+        <p class="muted">检测中...</p>
+      </section>
+
+      <section class="card">
+        <h2>快速检查</h2>
+        <div class="grid checks" id="checks"></div>
+      </section>
+
+      <section class="card">
+        <h2>语音测试</h2>
+        <div class="grid">
+          <label class="field">
+            <span>当前浏览器可见语音</span>
+            <select id="voice-pick"></select>
+          </label>
+          <div class="actions">
+            <button class="primary" id="play-voice" type="button">测试选中语音</button>
+            <button id="stop-voice" type="button">停止</button>
+          </div>
+          <p class="muted" id="voice-hint">检测中...</p>
+          <pre id="voice-result">等待检测...</pre>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>文件导入测试</h2>
+        <p class="muted">这里只检查浏览器是否能拿到文件，不会上传到服务器。</p>
+        <div class="actions" style="margin-top: 12px">
+          <label class="button primary" for="file-test">选择书籍文件</label>
+          <input id="file-test" type="file" accept=".pdf,.epub,.txt,.md,.markdown" />
+        </div>
+        <pre id="file-result">等待选择文件...</pre>
+      </section>
+
+      <section class="card">
+        <h2>扫描 OCR 说明</h2>
+        <div class="grid">
+          <div class="note">
+            <h3>推荐类型</h3>
+            <p class="muted">可复制文字 PDF、EPUB、TXT、Markdown，或清晰、正放、单栏、无严重阴影的扫描 PDF。</p>
+          </div>
+          <div class="note">
+            <h3>可能困难</h3>
+            <p class="muted">拍照歪斜、分辨率低、双栏论文、公式表格密集、手写体、水印很重、竖排古籍和背景发灰的扫描页。</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const checksEl = document.querySelector("#checks");
+      const mobileGuidanceEl = document.querySelector("#mobile-guidance .muted");
+      const voicePick = document.querySelector("#voice-pick");
+      const voiceHint = document.querySelector("#voice-hint");
+      const voiceResult = document.querySelector("#voice-result");
+      const playVoiceButton = document.querySelector("#play-voice");
+      const stopVoiceButton = document.querySelector("#stop-voice");
+      const fileInput = document.querySelector("#file-test");
+      const fileResult = document.querySelector("#file-result");
+      const runButton = document.querySelector("#run-tests");
+
+      function renderCheck(title, status, detail, level = "ok") {
+        const item = document.createElement("div");
+        item.className = "check";
+        item.innerHTML = `<strong><span>${title}</span><span class="status ${level}">${status}</span></strong><p class="muted">${detail}</p>`;
+        checksEl.appendChild(item);
+      }
+
+      function isLikelyInAppBrowser() {
+        const ua = (navigator.userAgent || "").toLowerCase();
+        return /micromessenger|wechat|qq\/|weibo|line\/|fbav|fban|instagram|messenger|miuibrowser|huaweibrowser/.test(ua);
+      }
+
+      function isLikelyDesktopModeOnPhone() {
+        return Boolean(window.matchMedia?.("(pointer: coarse)").matches && window.innerWidth >= 900);
+      }
+
+      function isCoarsePointer() {
+        return Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+      }
+
+      async function getVoices() {
+        if (!("speechSynthesis" in window)) {
+          return [];
+        }
+        const immediate = window.speechSynthesis.getVoices();
+        if (immediate.length) {
+          return immediate;
+        }
+        return await new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            resolve(window.speechSynthesis.getVoices());
+          };
+          const timer = window.setTimeout(finish, 1600);
+          if (typeof window.speechSynthesis.addEventListener === "function") {
+            window.speechSynthesis.addEventListener(
+              "voiceschanged",
+              () => {
+                window.clearTimeout(timer);
+                finish();
+              },
+              { once: true },
+            );
+            return;
+          }
+          const previous = window.speechSynthesis.onvoiceschanged;
+          window.speechSynthesis.onvoiceschanged = () => {
+            window.clearTimeout(timer);
+            previous?.();
+            finish();
+          };
+        });
+      }
+
+      async function checkOcrCdn() {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 2800);
+        try {
+          const response = await fetch("https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js", {
+            method: "HEAD",
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          return response.ok;
+        } catch {
+          return false;
+        } finally {
+          window.clearTimeout(timer);
+        }
+      }
+
+      function describeMobileGuidance(voices) {
+        const tips = [];
+        if (isLikelyInAppBrowser()) {
+          tips.push("当前很像微信或其他内置浏览器，语音最容易缺失。请优先改用手机 Edge、Chrome 或 iPhone 的 Safari。");
+        }
+        if (isLikelyDesktopModeOnPhone()) {
+          tips.push("当前像是手机误开了桌面版网站。请先关闭“桌面版网站”，页面会回到手机布局。");
+        }
+        if (!("speechSynthesis" in window)) {
+          tips.push("这个浏览器没有暴露系统朗读能力。");
+        } else if (!voices.length) {
+          tips.push("浏览器支持朗读接口，但当前容器没有给出系统语音。换到系统浏览器通常更容易恢复。");
+        } else if (isCoarsePointer()) {
+          tips.push("手机上出现的语音只来自这台手机自己的系统语音包，不会继承电脑上的声音。");
+        }
+        if (!tips.length) {
+          tips.push("当前环境看起来适合做手机端听读测试。");
+        }
+        return tips.join(" ");
+      }
+
+      async function populateVoiceSelector() {
+        const voices = await getVoices();
+        voicePick.innerHTML = "";
+
+        if (!voices.length) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "当前浏览器未暴露系统语音";
+          voicePick.appendChild(option);
+          voiceHint.textContent = describeMobileGuidance(voices);
+          voiceResult.textContent = "当前浏览器尚未返回可选语音列表。";
+          return voices;
+        }
+
+        voices
+          .slice()
+          .sort((a, b) => `${a.lang}-${a.name}`.localeCompare(`${b.lang}-${b.name}`))
+          .forEach((voice, index) => {
+            const option = document.createElement("option");
+            option.value = voice.voiceURI || `${voice.name}-${index}`;
+            option.textContent = `${voice.lang || "-"} | ${voice.name}${voice.default ? " | 默认" : ""}`;
+            option.dataset.voiceIndex = String(index);
+            voicePick.appendChild(option);
+          });
+
+        const zhVoice =
+          voices.find((voice) => /zh-cn/i.test(voice.lang || "") && /xiaoxiao|yunxi|huihui|yaoyao|xiaoyi/i.test(voice.name || "")) ||
+          voices.find((voice) => /zh/i.test(voice.lang || "")) ||
+          voices.find((voice) => /en-us|en-gb/i.test(voice.lang || "")) ||
+          voices[0];
+        const selectedIndex = Math.max(
+          0,
+          voices.findIndex((voice) => voice === zhVoice),
+        );
+        voicePick.selectedIndex = selectedIndex;
+        voiceHint.textContent = `当前浏览器共暴露 ${voices.length} 个语音。手机上看到什么语音，完全取决于手机系统和当前浏览器。`;
+        voiceResult.textContent = voices.map((voice) => `${voice.lang || "-"} | ${voice.name}${voice.default ? " | 默认" : ""}`).join("\n");
+        return voices;
+      }
+
+      async function runTests() {
+        checksEl.textContent = "";
+        const voices = await populateVoiceSelector();
+        mobileGuidanceEl.textContent = describeMobileGuidance(voices);
+
+        renderCheck("主页面", "可访问", "点击“返回阅读器”可回到主应用。");
+
+        const manifestResponse = await fetch("./manifest.webmanifest", { cache: "no-store" }).catch(() => null);
+        renderCheck(
+          "PWA Manifest",
+          manifestResponse?.ok ? "正常" : "异常",
+          manifestResponse?.ok ? "Manifest 可以读取，支持添加到桌面。" : "Manifest 读取失败，请检查本地服务。",
+          manifestResponse?.ok ? "ok" : "bad",
+        );
+
+        renderCheck(
+          "语音接口",
+          "speechSynthesis" in window ? "已提供" : "未提供",
+          "speechSynthesis" in window
+            ? "当前浏览器至少提供了朗读接口，是否真有可用语音还要看下方语音列表。"
+            : "当前浏览器没有暴露系统朗读接口，主应用里也无法直接朗读。",
+          "speechSynthesis" in window ? "ok" : "bad",
+        );
+
+        renderCheck(
+          "当前环境",
+          isLikelyInAppBrowser() ? "内置浏览器风险" : isLikelyDesktopModeOnPhone() ? "像桌面版模式" : "正常",
+          isLikelyInAppBrowser()
+            ? "这类容器经常不让网页拿到完整系统语音。"
+            : isLikelyDesktopModeOnPhone()
+              ? "请关闭桌面版网站，让页面切回手机布局。"
+              : "当前不像受限的内置浏览器或桌面版模式。",
+          isLikelyInAppBrowser() || isLikelyDesktopModeOnPhone() ? "warn" : "ok",
+        );
+
+        renderCheck(
+          "浏览器语音列表",
+          voices.length ? `${voices.length} 个` : "未暴露",
+          voices.length
+            ? "已经拿到系统语音，可直接从上面的下拉框切换并测试。"
+            : "没有拿到系统语音。建议切换到系统浏览器，或确认手机系统已安装文字转语音引擎。",
+          voices.length ? "ok" : "warn",
+        );
+
+        const ocrReady = await checkOcrCdn();
+        renderCheck(
+          "OCR 网络依赖",
+          ocrReady ? "可访问" : "可能受限",
+          ocrReady ? "OCR 引擎资源可以访问，扫描版 PDF 能开始准备识别。" : "OCR 引擎资源访问失败时，扫描 PDF 的识别会明显受影响。",
+          ocrReady ? "ok" : "warn",
+        );
+      }
+
+      playVoiceButton.addEventListener("click", async () => {
+        const voices = await getVoices();
+        const selectedVoice = voices[voicePick.selectedIndex] || null;
+        if (!selectedVoice) {
+          voiceHint.textContent = "当前没有可直接测试的浏览器语音。请换到手机系统浏览器再试。";
+          return;
+        }
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(/en/i.test(selectedVoice.lang || "") ? "Hello from iStone Reader test." : "这是 iStone Reader 的手机语音测试。");
+        utterance.voice = selectedVoice;
+        utterance.lang = selectedVoice.lang || "zh-CN";
+        utterance.rate = 1;
+        utterance.onstart = () => {
+          voiceHint.textContent = `正在测试：${selectedVoice.lang || "-"} | ${selectedVoice.name}`;
+        };
+        utterance.onerror = () => {
+          voiceHint.textContent = "浏览器返回了语音，但当前容器没有成功播放。建议改用手机 Edge、Chrome 或 Safari。";
+        };
+        utterance.onend = () => {
+          voiceHint.textContent = `测试完成：${selectedVoice.lang || "-"} | ${selectedVoice.name}`;
+        };
+        window.speechSynthesis.speak(utterance);
+      });
+
+      stopVoiceButton.addEventListener("click", () => {
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel();
+        }
+        voiceHint.textContent = "测试语音已停止。";
+      });
+
+      fileInput.addEventListener("change", () => {
+        const [file] = fileInput.files || [];
+        if (!file) {
+          fileResult.textContent = "未选择文件。";
+          return;
+        }
+        fileResult.textContent = JSON.stringify(
+          {
+            name: file.name,
+            type: file.type || "未知",
+            size: `${(file.size / 1024 / 1024).toFixed(2)} MB`,
+            lastModified: new Date(file.lastModified).toLocaleString(),
+          },
+          null,
+          2,
+        );
+      });
+
+      runButton.addEventListener("click", () => {
+        void runTests();
+      });
+
+      void runTests();
+    </script>
+  </body>
+</html>
