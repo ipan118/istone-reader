@@ -66,7 +66,7 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  font-family: "Outfit", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   color: var(--text-main);
   background: var(--body-background);
   overflow-x: hidden;
@@ -785,6 +785,7 @@ input[type="range"]::-moz-range-thumb {
   padding: 6px 0;
   border-radius: 18px;
   line-height: 1.9;
+  font-size: calc(1em * var(--reader-font-scale, 1));
   color: var(--text-main);
   background: transparent;
   border: 1px solid transparent;
@@ -849,6 +850,91 @@ input[type="range"]::-moz-range-thumb {
   padding: 12px 14px;
   border-radius: 18px;
   font-weight: 600;
+}
+
+.library-block {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 22px;
+  background: var(--surface-muted);
+  border: 1px solid var(--surface-strong);
+}
+
+.library-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.library-empty {
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.library-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: var(--surface-soft);
+  border: 1px solid var(--surface-strong);
+}
+
+.library-item.active {
+  border-color: var(--active-outline);
+}
+
+.library-item-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.library-item-info strong {
+  font-size: 0.95rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.library-item-info span {
+  color: var(--text-soft);
+  font-size: 0.82rem;
+}
+
+.library-item-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.library-open-button,
+.library-delete-button {
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--ghost-background);
+  border: 1px solid var(--ghost-border);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.library-open-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.library-delete-button {
+  color: #d4564e;
 }
 
 @keyframes drift {

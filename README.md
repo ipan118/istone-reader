@@ -1,31 +1,33 @@
 # iStone Reader
 
-轻量 PWA 听读工具，支持导入 `PDF / EPUB / TXT / MD`，自动生成章节导航，并调用当前设备可用语音进行朗读。
+轻量 PWA 听读工具，支持导入 `PDF / EPUB / TXT / MD`，自动生成章节导航，并调用当前设备可用语音进行朗读。所有解析和识别都在本地完成，不依赖外部服务。
 
 ## 功能
 
 - 导入 `PDF / EPUB / TXT / MD`
-- 扫描版 PDF OCR 识别
+- 本机书架：导入过的书自动保存（IndexedDB），下次打开自动恢复上次听读位置
+- 扫描版 PDF OCR 识别（引擎与中英文模型已内置，离线可用）
 - 自动章节拆分和下拉章节导航
-- 语音朗读、语速调节、暂停与继续
+- 语音朗读、语速调节、暂停与继续、上一句/下一句
+- 定时关闭（睡眠定时器）
+- 锁屏/后台辅助：朗读时保持屏幕常亮（Wake Lock），回到前台自动续读，支持系统媒体控制（Media Session）
 - 中文和英文语音自动匹配
-- 浅色/暗色两套 PWA 界面
-- 支持添加到电脑桌面和手机主屏幕
+- 正文字号调节
+- 浅色/暗色界面，默认跟随系统主题
+- 支持添加到电脑桌面和手机主屏幕，支持系统分享导入
 
 ## 本地运行
 
-带 Windows 本机英文语音桥：
+任意静态服务器均可，例如：
 
-```powershell
-cd D:\Codex\coding\projects\vivid-reader-pwa
-python serve.py --bind 127.0.0.1 --port 4173
+```bash
+python3 -m http.server 4173 --bind 127.0.0.1
 ```
 
-普通静态预览：
+带 Windows 本机语音桥（可选，提供更稳定的本机声线）：
 
-```powershell
-cd D:\Codex\coding\projects\vivid-reader-pwa
-python -m http.server 4173 --bind 127.0.0.1
+```bash
+python serve.py --bind 127.0.0.1 --port 4173
 ```
 
 打开：
@@ -36,15 +38,24 @@ http://127.0.0.1:4173/
 
 ## PWA 发布
 
-详细发布、浏览器访问和添加到桌面步骤见：
-
-```text
-PWA_RELEASE_GUIDE.md
-```
+详细发布、浏览器访问和添加到桌面步骤见 `PWA_RELEASE_GUIDE.md`。
 
 ## 本地验证
 
-```powershell
-$env:NODE_PATH='C:\Users\68284\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\node_modules'
-& 'C:\Users\68284\.cache\codex-runtimes\codex-primary-runtime\dependencies\node\bin\node.exe' .\smoke-test.cjs
+冒烟测试基于 Playwright（使用其自带 Chromium）：
+
+```bash
+npm install playwright
+npx playwright install chromium
+python3 -m http.server 4173 --bind 127.0.0.1 &
+node smoke-test.cjs
 ```
+
+可通过 `TARGET_URL` 环境变量指定其他地址。
+
+## 目录说明
+
+- `app.js` 应用主逻辑（解析、分章、朗读、OCR、UI）
+- `library.js` 本机书架与进度持久化（IndexedDB）
+- `sw.js` Service Worker（离线缓存与分享导入）
+- `vendor/` 本地依赖：pdf.js、epub.js、jszip、Tesseract（含 `tessdata/` 中英文识别模型）

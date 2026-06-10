@@ -13,12 +13,6 @@
     <meta name="apple-mobile-web-app-title" content="iStone Reader" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>iStone Reader</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700;800&display=swap"
-      rel="stylesheet"
-    />
     <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./assets/icon-180.png" />
     <link rel="manifest" href="./manifest.webmanifest" />
@@ -45,7 +39,6 @@
         <div class="hero-actions">
           <label class="upload-button" for="book-file-input">导入书籍</label>
           <button class="ghost-button" id="load-demo-button" type="button">加载演示书</button>
-          <a class="ghost-button" href="./test.html">测试页面</a>
         </div>
         <input
           id="book-file-input"
@@ -108,6 +101,13 @@
               </div>
             </div>
           </div>
+          <div class="library-block">
+            <div class="block-heading">
+              <strong>本机书架</strong>
+              <span>导入过的书自动保存，附带听读进度</span>
+            </div>
+            <ul class="library-list" id="library-list"></ul>
+          </div>
         </article>
 
         <article class="glass-card panel-card voice-card">
@@ -133,11 +133,23 @@
               </label>
               <p class="micro-helper">拖动后会立即应用到当前朗读句。</p>
             </div>
+            <label class="field-block">
+              <span>定时关闭</span>
+              <select id="sleep-timer-select">
+                <option value="0">不定时</option>
+                <option value="15">15 分钟后停止</option>
+                <option value="30">30 分钟后停止</option>
+                <option value="60">60 分钟后停止</option>
+                <option value="90">90 分钟后停止</option>
+              </select>
+            </label>
           </div>
           <div class="control-button-row">
             <button class="primary-button" id="speak-button" type="button">开始朗读</button>
             <button class="ghost-button" id="pause-button" type="button">暂停 / 继续</button>
             <button class="ghost-button" id="stop-button" type="button">停止</button>
+            <button class="ghost-button" id="prev-sentence-button" type="button">上一句</button>
+            <button class="ghost-button" id="next-sentence-button" type="button">下一句</button>
             <button class="ghost-button" id="voice-test-button" type="button">测试发声</button>
           </div>
           <p class="helper-text" id="voice-hint">
@@ -188,8 +200,9 @@
               <label class="field-block">
                 <span>识别语言</span>
                 <select id="ocr-language-select">
-                  <option value="eng">英文</option>
                   <option value="eng+chi_sim">中英混合</option>
+                  <option value="chi_sim">简体中文</option>
+                  <option value="eng">英文</option>
                 </select>
               </label>
               <p class="helper-text" id="ocr-helper">
@@ -226,6 +239,13 @@
             <span>章节选择</span>
             <select id="chapter-select"></select>
           </label>
+          <label class="field-block">
+            <div class="field-header">
+              <span>正文字号</span>
+              <strong id="font-size-value">100%</strong>
+            </div>
+            <input id="font-size-range" type="range" min="85" max="140" step="5" value="100" />
+          </label>
           <div class="reader-dashboard-support visually-hidden" aria-hidden="true">
             <div class="chapter-chip-list" id="chapter-chip-list"></div>
             <strong id="position-range-label">0 / 0</strong>
@@ -248,7 +268,7 @@
 
     <script src="./vendor/jszip.min.js"></script>
     <script src="./vendor/epub.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="./vendor/tesseract/tesseract.min.js"></script>
     <script type="module" src="./app.js"></script>
   </body>
 </html>

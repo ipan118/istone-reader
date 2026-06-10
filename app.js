@@ -1,11 +1,24 @@
 import * as pdfjsLib from "./vendor/pdf.min.mjs";
+import {
+  saveBookToLibrary,
+  getLibraryBook,
+  listLibraryBooks,
+  deleteLibraryBook,
+  updateLibraryProgress,
+} from "./library.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
 const SETTINGS_KEY = "vivid-reader-settings-v2";
-const OCR_REMOTE = {
-  workerPath: "https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js",
-  corePath: "https://cdn.jsdelivr.net/npm/tesseract.js-core@5",
+const OCR_ASSET_PATHS = {
+  workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
+  corePath: new URL("./vendor/tesseract", import.meta.url).toString(),
+  langPath: new URL("./vendor/tessdata", import.meta.url).toString(),
+};
+const OCR_LANGUAGE_LABELS = {
+  "eng+chi_sim": "中英混合",
+  chi_sim: "简体中文",
+  eng: "英文",
 };
 
 const TONE_PRESETS = {
@@ -192,7 +205,7 @@ const state = {
   toneDepth: 84,
   toneGlow: 54,
   ocrMode: "auto",
-  ocrLanguage: "eng",
+  ocrLanguage: "eng+chi_sim",
   ocrWorker: null,
   ocrWorkerKey: "",
   speechAttemptNonce: 0,
@@ -202,6 +215,16 @@ const state = {
   voiceCatalogRetryTimer: 0,
   voiceCatalogRetryCount: 0,
   speechAbortController: null,
+  bookId: "",
+  bookTransient: false,
+  wakeLockSentinel: null,
+  keepAliveTimer: 0,
+  sleepTimerId: 0,
+  sleepTimerEndsAt: 0,
+  boundaryFallbackTimers: [],
+  progressSaveTimer: 0,
+  fontScale: 100,
+  toneChosenByUser: false,
 };
 
 const dom = {
@@ -257,6 +280,12 @@ const dom = {
   speechDiagnostic: document.getElementById("speech-diagnostic"),
   speechDiagnosticTitle: document.getElementById("speech-diagnostic-title"),
   speechDiagnosticText: document.getElementById("speech-diagnostic-text"),
+  libraryList: document.getElementById("library-list"),
+  sleepTimerSelect: document.getElementById("sleep-timer-select"),
+  prevSentenceButton: document.getElementById("prev-sentence-button"),
+  nextSentenceButton: document.getElementById("next-sentence-button"),
+  fontSizeRange: document.getElementById("font-size-range"),
+  fontSizeValue: document.getElementById("font-size-value"),
 };
 
 bootstrap();
@@ -265,12 +294,16 @@ async function bootstrap() {
   prepareToneControls();
   applyBrandCopy();
   hydrateSettings();
+  applySystemTonePreference();
   applyToneFromState();
   refreshToneControls();
   refreshOcrHint();
+  applyFontScale();
   wireEvents();
   refreshSpeechControls();
   renderSpeechDiagnostics();
+  registerMediaSessionHandlers();
+  registerVisibilityRecovery();
   void loadVoices();
   renderJumpButtons(dom.positionDotRow, 0, 0, () => {});
 
@@ -291,10 +324,58 @@ async function bootstrap() {
   void importSharedBookIfAvailable();
   window.addEventListener("beforeunload", () => {
     terminateOcrWorker();
+    void persistProgressNow();
   });
+  void refreshLibraryUi();
   if (!state.book) {
-    loadDemoBook({ auto: true });
+    const restored = await restoreLastLibraryBook();
+    if (!restored && !state.book) {
+      loadDemoBook({ auto: true });
+    }
   }
+}
+
+function applySystemTonePreference() {
+  if (typeof window.matchMedia !== "function") {
+    return;
+  }
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  if (!state.toneChosenByUser) {
+    state.tonePreset = media.matches ? "dark" : "light";
+  }
+  const onSystemToneChange = (event) => {
+    if (state.toneChosenByUser) {
+      return;
+    }
+    state.tonePreset = event.matches ? "dark" : "light";
+    applyToneFromState();
+    refreshToneControls();
+  };
+  if (typeof media.addEventListener === "function") {
+    media.addEventListener("change", onSystemToneChange);
+  }
+}
+
+function registerVisibilityRecovery() {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      void persistProgressNow();
+      return;
+    }
+    if (!state.speaking) {
+      return;
+    }
+    void acquireWakeLock();
+    if (
+      !state.paused &&
+      !state.activeAudio &&
+      "speechSynthesis" in window &&
+      !window.speechSynthesis.speaking &&
+      !window.speechSynthesis.pending
+    ) {
+      requestSpeechRestart("回到前台，自动从当前句继续朗读");
+    }
+  });
 }
 
 function applyBrandCopy() {
@@ -365,12 +446,31 @@ function wireEvents() {
     state.voiceURI = dom.voiceSelect.value;
     refreshVoiceHint();
     handleVoiceChangeDuringPlayback();
+    saveSettings();
   });
 
   dom.rateRange?.addEventListener("input", () => {
     state.rate = clamp(Number(dom.rateRange.value), 0.5, 3.0);
     dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
     applyRateChangeDuringPlayback();
+    saveSettings();
+  });
+
+  dom.prevSentenceButton?.addEventListener("click", () => {
+    stepSentence(-1);
+  });
+  dom.nextSentenceButton?.addEventListener("click", () => {
+    stepSentence(1);
+  });
+
+  dom.sleepTimerSelect?.addEventListener("change", () => {
+    applySleepTimerSelection();
+  });
+
+  dom.fontSizeRange?.addEventListener("input", () => {
+    state.fontScale = clamp(Number(dom.fontSizeRange.value), 85, 140);
+    applyFontScale();
+    saveSettings();
   });
 
   dom.speakButton.addEventListener("click", () => {
@@ -400,6 +500,7 @@ function wireEvents() {
   dom.tonePresetButtons.forEach((button) => {
     button.addEventListener("click", () => {
       state.tonePreset = button.dataset.tonePreset || "dark";
+      state.toneChosenByUser = true;
       applyToneFromState();
       refreshToneControls();
       saveSettings();
@@ -484,8 +585,12 @@ function hydrateSettings() {
     }
     const settings = JSON.parse(raw);
     state.tonePreset = ["dark", "light"].includes(settings.tonePreset) ? settings.tonePreset : state.tonePreset;
+    state.toneChosenByUser = settings.toneSource === "user" && ["dark", "light"].includes(settings.tonePreset);
     state.ocrMode = ["auto", "always", "off"].includes(settings.ocrMode) ? settings.ocrMode : state.ocrMode;
-    state.ocrLanguage = ["eng", "eng+chi_sim"].includes(settings.ocrLanguage) ? settings.ocrLanguage : state.ocrLanguage;
+    state.ocrLanguage = Object.hasOwn(OCR_LANGUAGE_LABELS, settings.ocrLanguage) ? settings.ocrLanguage : state.ocrLanguage;
+    state.rate = clamp(Number(settings.rate) || state.rate, 0.5, 3.0);
+    state.voiceURI = typeof settings.voiceURI === "string" ? settings.voiceURI : state.voiceURI;
+    state.fontScale = clamp(Number(settings.fontScale) || state.fontScale, 85, 140);
   } catch {
     // Ignore malformed local settings.
   }
@@ -494,13 +599,20 @@ function hydrateSettings() {
 function saveSettings() {
   const payload = {
     tonePreset: state.tonePreset,
+    toneSource: state.toneChosenByUser ? "user" : "system",
     ocrMode: state.ocrMode,
     ocrLanguage: state.ocrLanguage,
+    rate: state.rate,
+    voiceURI: state.voiceURI,
+    fontScale: state.fontScale,
   };
   window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload));
 }
 
 function refreshSpeechControls() {
+  if (dom.rateRange) {
+    dom.rateRange.value = String(state.rate);
+  }
   dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
 }
 
@@ -525,8 +637,8 @@ function refreshOcrHint() {
   dom.ocrLanguageSelect.value = state.ocrLanguage;
   const modeText =
     state.ocrMode === "auto" ? "遇到扫描页时自动识别" : state.ocrMode === "always" ? "所有 PDF 页都强制识别" : "已关闭扫描识别";
-  const langText = state.ocrLanguage === "eng" ? "英文模型" : "中英混合模型";
-  dom.ocrHelper.textContent = `${modeText}，当前使用 ${langText}。扫描版文件会比普通 PDF 更慢。`;
+  const langText = `${OCR_LANGUAGE_LABELS[state.ocrLanguage] || "中英混合"}模型`;
+  dom.ocrHelper.textContent = `${modeText}，当前使用 ${langText}。识别引擎和文字模型已内置，离线也可以使用。`;
 }
 
 function scheduleVoiceReload() {
@@ -1141,9 +1253,9 @@ async function ensureOcrWorker() {
   }
 
   await terminateOcrWorker();
-  setStatus(`正在准备 OCR（${state.ocrLanguage === "eng" ? "英文" : "中英混合"}）`);
+  setStatus(`正在准备 OCR（${OCR_LANGUAGE_LABELS[state.ocrLanguage] || "中英混合"}）`);
   state.ocrWorker = await window.Tesseract.createWorker(getOcrLanguageArgument(state.ocrLanguage), 1, {
-    ...OCR_REMOTE,
+    ...OCR_ASSET_PATHS,
     logger(message) {
       if (typeof message.progress === "number") {
         setStatus(`OCR 引擎准备中 ${Math.round(message.progress * 100)}%`);
@@ -1174,20 +1286,22 @@ async function terminateOcrWorker() {
   }
 }
 
-function finalizeBook(bookData) {
+function finalizeBook(bookData, options = {}) {
   stopSpeech({ silent: true });
 
-  const sanitizedSections = normalizeBookSections(bookData.sections
-    .map((section, index) => ({
-      id: section.id || `section-${index + 1}`,
-      title: cleanHeading(section.title || `章节 ${index + 1}`),
-      text: cleanDisplayText(section.text || ""),
-      sourceHint: section.sourceHint || "",
-    }))
-    .filter((section) => section.text.trim()), {
-      format: bookData.format,
-      fallbackTitle: cleanHeading(bookData.title || "正文"),
-    });
+  const sanitizedSections = options.preNormalized
+    ? bookData.sections
+    : normalizeBookSections(bookData.sections
+      .map((section, index) => ({
+        id: section.id || `section-${index + 1}`,
+        title: cleanHeading(section.title || `章节 ${index + 1}`),
+        text: cleanDisplayText(section.text || ""),
+        sourceHint: section.sourceHint || "",
+      }))
+      .filter((section) => section.text.trim()), {
+        format: bookData.format,
+        fallbackTitle: cleanHeading(bookData.title || "正文"),
+      });
 
   if (!sanitizedSections.length) {
     throw new Error("没有解析出可阅读内容。");
@@ -1199,6 +1313,8 @@ function finalizeBook(bookData) {
     totalCharacters: sanitizedSections.reduce((sum, section) => sum + section.text.length, 0),
     totalParagraphs: sanitizedSections.reduce((sum, section) => sum + getSectionParagraphCount(section), 0),
   };
+  state.bookId = options.bookId || createBookId(state.book);
+  state.bookTransient = Boolean(options.transient);
   state.currentSectionIndex = 0;
   state.currentParagraphIndex = 0;
   state.currentSentenceIndex = 0;
@@ -1208,7 +1324,196 @@ function finalizeBook(bookData) {
 
   renderBookMeta();
   renderChapterChips();
-  setCurrentSection(0, { stopSpeaking: true, resetParagraph: true, resetSentence: true });
+
+  const progress = options.progress || null;
+  const startSectionIndex = clamp(progress?.sectionIndex ?? 0, 0, sanitizedSections.length - 1);
+  setCurrentSection(startSectionIndex, { stopSpeaking: true, resetParagraph: true, resetSentence: true });
+  if (progress && Number.isFinite(progress.sentenceIndex) && progress.sentenceIndex > 0) {
+    state.currentSentenceIndex = clamp(progress.sentenceIndex, 0, Math.max(0, state.renderedSentenceCount - 1));
+    highlightSentence(state.currentSentenceIndex, { smooth: false });
+    updateSpeechProgress();
+  }
+
+  if (!state.bookTransient) {
+    void persistBookToLibrary();
+  }
+}
+
+function createBookId(book) {
+  const seed = `${book.title || ""}::${book.format || ""}::${book.totalCharacters || 0}`;
+  let hash = 5381;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = ((hash << 5) + hash + seed.charCodeAt(index)) >>> 0;
+  }
+  return `book-${hash.toString(36)}`;
+}
+
+function currentReadingProgress() {
+  return {
+    sectionIndex: state.currentSectionIndex,
+    paragraphIndex: state.currentParagraphIndex,
+    sentenceIndex: state.currentSentenceIndex,
+    updatedAt: Date.now(),
+  };
+}
+
+async function persistBookToLibrary() {
+  if (!state.book || !state.bookId) {
+    return;
+  }
+  try {
+    await saveBookToLibrary({
+      id: state.bookId,
+      title: state.book.title,
+      subtitle: state.book.subtitle || "",
+      format: state.book.format,
+      sourceHint: state.book.sourceHint || "",
+      sections: state.book.sections.map((section) => ({
+        id: section.id,
+        title: section.title,
+        text: section.text,
+        sourceHint: section.sourceHint || "",
+      })),
+      totalCharacters: state.book.totalCharacters,
+      totalParagraphs: state.book.totalParagraphs,
+      progress: currentReadingProgress(),
+    });
+    void refreshLibraryUi();
+  } catch {
+    // Library persistence is a progressive enhancement.
+  }
+}
+
+function schedulePersistProgress() {
+  if (!state.bookId || state.bookTransient) {
+    return;
+  }
+  window.clearTimeout(state.progressSaveTimer);
+  state.progressSaveTimer = window.setTimeout(() => {
+    void persistProgressNow();
+  }, 1200);
+}
+
+async function persistProgressNow() {
+  if (!state.bookId || state.bookTransient || !state.book) {
+    return;
+  }
+  window.clearTimeout(state.progressSaveTimer);
+  try {
+    await updateLibraryProgress(state.bookId, currentReadingProgress());
+  } catch {
+    // Ignore persistence failures.
+  }
+}
+
+async function restoreLastLibraryBook() {
+  try {
+    const books = await listLibraryBooks();
+    const latest = books[0];
+    if (!latest) {
+      return false;
+    }
+    return await openLibraryBook(latest.id, { auto: true });
+  } catch {
+    return false;
+  }
+}
+
+async function openLibraryBook(bookId, options = {}) {
+  try {
+    const record = await getLibraryBook(bookId);
+    if (!record || !Array.isArray(record.sections) || !record.sections.length) {
+      return false;
+    }
+    finalizeBook(
+      {
+        title: record.title,
+        subtitle: record.subtitle || "",
+        format: record.format,
+        sections: record.sections,
+        sourceHint: record.sourceHint || "",
+      },
+      { bookId: record.id, preNormalized: true, progress: record.progress },
+    );
+    setStatus(options.auto ? `已自动恢复《${record.title}》` : `已打开《${record.title}》`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function refreshLibraryUi() {
+  if (!dom.libraryList) {
+    return;
+  }
+  let books = [];
+  try {
+    books = await listLibraryBooks();
+  } catch {
+    books = [];
+  }
+
+  dom.libraryList.innerHTML = "";
+  if (!books.length) {
+    const empty = document.createElement("li");
+    empty.className = "library-empty";
+    empty.textContent = "导入的书会自动保存在本机书架，下次打开免重复导入。";
+    dom.libraryList.appendChild(empty);
+    return;
+  }
+
+  books.forEach((bookMeta) => {
+    const item = document.createElement("li");
+    item.className = "library-item";
+    if (bookMeta.id === state.bookId) {
+      item.classList.add("active");
+    }
+
+    const info = document.createElement("div");
+    info.className = "library-item-info";
+    const title = document.createElement("strong");
+    title.textContent = bookMeta.title || "未命名书籍";
+    const meta = document.createElement("span");
+    const sectionCount = Math.max(1, bookMeta.sectionCount || 1);
+    const percent = bookMeta.progress
+      ? Math.round((clamp(bookMeta.progress.sectionIndex + 1, 1, sectionCount) / sectionCount) * 100)
+      : 0;
+    meta.textContent = `${bookMeta.format || "书籍"} · ${sectionCount} 章 · 进度 ${percent}%`;
+    info.append(title, meta);
+
+    const actions = document.createElement("div");
+    actions.className = "library-item-actions";
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "library-open-button";
+    openButton.textContent = bookMeta.id === state.bookId ? "当前" : "继续听";
+    openButton.disabled = bookMeta.id === state.bookId;
+    openButton.addEventListener("click", () => {
+      void openLibraryBook(bookMeta.id).then((opened) => {
+        if (opened) {
+          void refreshLibraryUi();
+        }
+      });
+    });
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "library-delete-button";
+    deleteButton.textContent = "删除";
+    deleteButton.addEventListener("click", () => {
+      void deleteLibraryBook(bookMeta.id)
+        .then(() => {
+          if (bookMeta.id === state.bookId) {
+            state.bookTransient = true;
+          }
+          return refreshLibraryUi();
+        })
+        .catch(() => {});
+    });
+    actions.append(openButton, deleteButton);
+
+    item.append(info, actions);
+    dom.libraryList.appendChild(item);
+  });
 }
 
 function renderBookMeta() {
@@ -1274,6 +1579,8 @@ function setCurrentSection(index, options = {}) {
   updateChipStates();
   updateProgressDisplays();
   updateSpeechProgress();
+  updateMediaSessionMetadata();
+  schedulePersistProgress();
 }
 
 function renderCurrentSection() {
@@ -1393,6 +1700,7 @@ function jumpToParagraph(index) {
   highlightSentence(state.currentSentenceIndex, { smooth: false });
   updateProgressDisplays();
   updateSpeechProgress();
+  schedulePersistProgress();
 }
 
 function jumpToSentence(index) {
@@ -1400,9 +1708,17 @@ function jumpToSentence(index) {
   const shouldResume = isSpeechActive();
   highlightSentence(state.currentSentenceIndex);
   updateSpeechProgress();
+  schedulePersistProgress();
   if (shouldResume) {
     void restartChapterSpeechFromIndex(state.currentSentenceIndex);
   }
+}
+
+function stepSentence(delta) {
+  if (!state.book || !state.renderedSentenceCount) {
+    return;
+  }
+  jumpToSentence(state.currentSentenceIndex + delta);
 }
 
 async function runVoiceSelfTest() {
@@ -1668,6 +1984,176 @@ function stopSpeech(options = {}) {
     dom.speechStateHint.textContent = "朗读已停止";
     renderSpeechDiagnostics("朗读已停止", "浏览器已经停止播放。你可以点“测试发声”先排查设备是否出声，再继续整章朗读。", "warning");
   }
+}
+
+async function acquireWakeLock() {
+  if (!("wakeLock" in navigator) || state.wakeLockSentinel) {
+    return;
+  }
+  try {
+    state.wakeLockSentinel = await navigator.wakeLock.request("screen");
+    state.wakeLockSentinel.addEventListener("release", () => {
+      state.wakeLockSentinel = null;
+    });
+  } catch {
+    state.wakeLockSentinel = null;
+  }
+}
+
+function releaseWakeLock() {
+  try {
+    void state.wakeLockSentinel?.release();
+  } catch {
+    // Ignore release failures.
+  }
+  state.wakeLockSentinel = null;
+}
+
+function startSpeechKeepAlive() {
+  stopSpeechKeepAlive();
+  if (!("speechSynthesis" in window)) {
+    return;
+  }
+  state.keepAliveTimer = window.setInterval(() => {
+    if (state.speaking && !state.paused && !state.activeAudio && window.speechSynthesis.speaking) {
+      window.speechSynthesis.resume();
+    }
+  }, 10000);
+}
+
+function stopSpeechKeepAlive() {
+  window.clearInterval(state.keepAliveTimer);
+  state.keepAliveTimer = 0;
+}
+
+function onSpeechPlaybackStarted() {
+  void acquireWakeLock();
+  startSpeechKeepAlive();
+  updateMediaSessionMetadata();
+  setMediaSessionPlaybackState("playing");
+}
+
+function onSpeechPlaybackStopped(options = {}) {
+  releaseWakeLock();
+  stopSpeechKeepAlive();
+  clearBoundaryFallbackTimers();
+  setMediaSessionPlaybackState(options.paused ? "paused" : "none");
+  void persistProgressNow();
+}
+
+function setMediaSessionPlaybackState(playbackState) {
+  if (!("mediaSession" in navigator)) {
+    return;
+  }
+  try {
+    navigator.mediaSession.playbackState = playbackState;
+  } catch {
+    // Ignore unsupported states.
+  }
+}
+
+function updateMediaSessionMetadata() {
+  if (!("mediaSession" in navigator) || typeof MediaMetadata !== "function" || !state.book) {
+    return;
+  }
+  try {
+    const section = getCurrentSection();
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: section?.title || state.book.title,
+      artist: state.book.title,
+      album: "iStone Reader",
+    });
+  } catch {
+    // Metadata is a progressive enhancement.
+  }
+}
+
+function registerMediaSessionHandlers() {
+  if (!("mediaSession" in navigator)) {
+    return;
+  }
+  const handlers = {
+    play: () => {
+      void startSpeech();
+    },
+    pause: () => {
+      void togglePause();
+    },
+    stop: () => {
+      stopSpeech();
+    },
+    previoustrack: () => {
+      stepSentence(-1);
+    },
+    nexttrack: () => {
+      stepSentence(1);
+    },
+  };
+  Object.entries(handlers).forEach(([action, handler]) => {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // Some actions are unsupported on certain platforms.
+    }
+  });
+}
+
+function applySleepTimerSelection() {
+  const minutes = Number(dom.sleepTimerSelect?.value) || 0;
+  window.clearTimeout(state.sleepTimerId);
+  state.sleepTimerId = 0;
+  state.sleepTimerEndsAt = 0;
+  if (!minutes) {
+    setStatus("已取消定时关闭");
+    return;
+  }
+  state.sleepTimerEndsAt = Date.now() + minutes * 60_000;
+  state.sleepTimerId = window.setTimeout(() => {
+    state.sleepTimerId = 0;
+    state.sleepTimerEndsAt = 0;
+    if (dom.sleepTimerSelect) {
+      dom.sleepTimerSelect.value = "0";
+    }
+    stopSpeech({ silent: true });
+    dom.speechStateHint.textContent = "定时关闭已触发，朗读已停止";
+    setStatus("定时关闭：朗读已停止");
+  }, minutes * 60_000);
+  setStatus(`定时关闭已设定：${minutes} 分钟后停止朗读`);
+}
+
+function applyFontScale() {
+  document.documentElement.style.setProperty("--reader-font-scale", String(state.fontScale / 100));
+  if (dom.fontSizeRange) {
+    dom.fontSizeRange.value = String(state.fontScale);
+  }
+  if (dom.fontSizeValue) {
+    dom.fontSizeValue.textContent = `${state.fontScale}%`;
+  }
+}
+
+function clearBoundaryFallbackTimers() {
+  state.boundaryFallbackTimers.forEach((timer) => window.clearTimeout(timer));
+  state.boundaryFallbackTimers = [];
+}
+
+function scheduleBoundaryFallback(slicedUnit, attemptNonce) {
+  clearBoundaryFallbackTimers();
+  const boundaries = slicedUnit?.boundaries || [];
+  if (boundaries.length < 2) {
+    return;
+  }
+  const lang = detectSpeechLang(slicedUnit.text || "");
+  const msPerChar = (lang.startsWith("zh") ? 200 : 65) / clamp(state.rate, 0.5, 3.0);
+  boundaries.slice(1).forEach((boundary) => {
+    const delay = Math.max(300, Math.round(boundary.start * msPerChar));
+    const timer = window.setTimeout(() => {
+      if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
+        return;
+      }
+      syncSpeechBoundary(boundaries, boundary.start);
+    }, delay);
+    state.boundaryFallbackTimers.push(timer);
+  });
 }
 
 function splitPlainTextIntoSections(rawText, fallbackName) {
@@ -3848,6 +4334,7 @@ startSpeech = async function () {
     state.paused = false;
     state.speaking = true;
     dom.speechStateHint.textContent = "朗读已继续";
+    onSpeechPlaybackStarted();
     return;
   }
   if (state.paused && "speechSynthesis" in window && (window.speechSynthesis.paused || window.speechSynthesis.speaking)) {
@@ -3855,6 +4342,7 @@ startSpeech = async function () {
     state.paused = false;
     state.speaking = true;
     dom.speechStateHint.textContent = "朗读已继续";
+    onSpeechPlaybackStarted();
     return;
   }
 
@@ -3873,6 +4361,7 @@ restartChapterSpeechFromIndex = async function (sentenceIndex) {
   }
   state.speaking = true;
   state.paused = false;
+  onSpeechPlaybackStarted();
   speakSentenceAt(sentenceIndex, false, attemptNonce);
 };
 
@@ -3896,6 +4385,7 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     dom.speechStateHint.textContent = "全书朗读结束";
     renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
     updateSpeechProgress();
+    onSpeechPlaybackStopped();
     return;
   }
 
@@ -3920,6 +4410,7 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   const voiceLabel = selectedVoice?.name || "默认声音";
   const voiceSource = isBridgeVoice(selectedVoice) ? "本机 Windows 声线" : "浏览器语音";
 
+  let boundaryEventSeen = false;
   const onStart = () => {
     if (attemptNonce !== state.speechAttemptNonce) {
       return;
@@ -3928,12 +4419,16 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     dom.speechStateHint.textContent = `正在朗读：${snippet}${sentences[sentenceIndex].length > 28 ? "..." : ""}`;
     highlightSentence(state.currentSentenceIndex);
     updateSpeechProgress();
+    updateMediaSessionMetadata();
+    schedulePersistProgress();
+    scheduleBoundaryFallback(slicedUnit, attemptNonce);
     renderSpeechDiagnostics("浏览器已开始发声", `当前使用 ${voiceSource} ${voiceLabel}。`, "success");
   };
   const onEnd = () => {
     if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
       return;
     }
+    clearBoundaryFallbackTimers();
     state.currentSentenceIndex = nextSentenceIndex + 1;
     updateSpeechProgress();
     speakSentenceAt(nextSentenceIndex + 1, false, attemptNonce);
@@ -3987,6 +4482,10 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   utterance.onstart = onStart;
   utterance.onboundary = (event) => {
     if (typeof event?.charIndex === "number" && slicedUnit?.boundaries?.length) {
+      if (!boundaryEventSeen) {
+        boundaryEventSeen = true;
+        clearBoundaryFallbackTimers();
+      }
       syncSpeechBoundary(slicedUnit.boundaries, event.charIndex);
     }
   };
@@ -4007,11 +4506,13 @@ togglePause = async function () {
       state.paused = false;
       state.speaking = true;
       dom.speechStateHint.textContent = "朗读已继续";
+      onSpeechPlaybackStarted();
     } else {
       state.activeAudio.pause();
       state.paused = true;
       state.speaking = false;
       dom.speechStateHint.textContent = "朗读已暂停";
+      onSpeechPlaybackStopped({ paused: true });
     }
     return;
   }
@@ -4024,11 +4525,13 @@ togglePause = async function () {
     state.paused = false;
     state.speaking = true;
     dom.speechStateHint.textContent = "朗读已继续";
+    onSpeechPlaybackStarted();
   } else {
     window.speechSynthesis.pause();
     state.paused = true;
     state.speaking = false;
     dom.speechStateHint.textContent = "朗读已暂停";
+    onSpeechPlaybackStopped({ paused: true });
   }
 };
 
@@ -4044,6 +4547,7 @@ stopSpeech = function (options = {}) {
   state.paused = false;
   state.activeUtterance = null;
   updateSpeechProgress();
+  onSpeechPlaybackStopped();
   if (!options.silent) {
     dom.speechStateHint.textContent = "朗读已停止";
   }
@@ -4080,7 +4584,7 @@ function loadDemoBook(options = {}) {
     format: "TXT",
     sections: demoSections,
     sourceHint: "内置示例文本，适合马上预览年轻化阅读界面。",
-  });
+  }, { transient: true });
   setStatus(options.auto ? "已自动载入演示预览" : "演示书已载入");
 }
 

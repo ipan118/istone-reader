@@ -1,12 +1,12 @@
-const CACHE_NAME = "istone-reader-pwa-v20";
+const CACHE_NAME = "istone-reader-pwa-v21";
 const SHARED_BOOK_URL = new URL("./shared-book", self.registration.scope).toString();
 const SHARE_TARGET_PATH = new URL("./share-target", self.registration.scope).pathname;
 const CORE_ASSETS = [
   "./",
   "./index.html",
-  "./test.html",
   "./styles.css",
   "./app.js",
+  "./library.js",
   "./manifest.webmanifest",
   "./assets/icon.svg",
   "./assets/icon-180.png",
@@ -16,6 +16,8 @@ const CORE_ASSETS = [
   "./vendor/epub.min.js",
   "./vendor/pdf.min.mjs",
   "./vendor/pdf.worker.min.mjs",
+  "./vendor/tesseract/tesseract.min.js",
+  "./vendor/tesseract/worker.min.js",
 ];
 
 self.addEventListener("install", (event) => {
@@ -67,7 +69,7 @@ self.addEventListener("fetch", (event) => {
   const isLiveAsset =
     url.origin === self.location.origin &&
     (event.request.mode === "navigate" ||
-      ["/", "/index.html", "/app.js", "/styles.css", "/manifest.webmanifest", "/sw.js"].includes(url.pathname));
+      ["/", "/index.html", "/app.js", "/library.js", "/styles.css", "/manifest.webmanifest", "/sw.js"].includes(url.pathname));
 
   if (isLiveAsset) {
     event.respondWith(
@@ -82,7 +84,19 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
+  event.respondWith(
+    caches.match(event.request).then(
+      (cached) =>
+        cached ||
+        fetch(event.request).then((response) => {
+          if (response.ok && url.origin === self.location.origin) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => Promise.resolve());
+          }
+          return response;
+        }),
+    ),
+  );
 });
 
 async function handleSharedBook(request) {
