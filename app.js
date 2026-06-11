@@ -17,6 +17,7 @@ const OCR_ASSET_PATHS = {
 };
 const OCR_LANGUAGE_LABELS = {
   "eng+chi_sim": "中英混合",
+  "chi_sim+eng": "中文优先",
   chi_sim: "简体中文",
   eng: "英文",
 };
@@ -119,8 +120,9 @@ const OCR_RENDER_MIN_SCALE = 1.8;
 const OCR_RENDER_MAX_SCALE = 3.2;
 const OCR_TARGET_LONG_EDGE = 2800;
 const OCR_MAX_PIXELS = 9_000_000;
-const OCR_WEAK_MIN_CHARS = 56;
-const OCR_WEAK_CONFIDENCE = 42;
+const OCR_MOBILE_TARGET_LONG_EDGE = 2200;
+const OCR_MOBILE_MAX_PIXELS = 5_500_000;
+const OCR_RETRY_MIN_CHARS = 20;
 const OCR_SYMBOL_RATIO_LIMIT = 0.32;
 const HEADING_LINE_RE = /^(?:#{1,6}\s*.+|(?:chapter|part)\s+\d+[^\n]*|第[一二三四五六七八九十百千万0-9]+[章节卷部篇回][^\n]*|(?:序章|序言|前言|引言|后记|尾声|番外)[^\n]*)$/i;
 const REFERENCE_HEADING_RE = /^(?:参考文献|references|bibliography)$/i;
@@ -165,8 +167,9 @@ const BOILERPLATE_LINE_RE = /(?:版权所有|侵权必究|出版社|出版|发�
 const TOC_LINE_RE = /(?:^\s*(?:第[一二三四五六七八九十百千万0-9]+[章节卷部篇回]|chapter|part|contents?)\b)|(?:\.{2,}\s*\d+\s*$)|(?:\s+\d+\s*$)/i;
 const PAGE_ARTIFACT_RE = /^(?:page\s*)?\d{1,4}$/i;
 const GENERIC_SECTION_TITLE_RE = /^(?:section|chapter|part|正文|内容|片段|分段|章节|第\s*\d+\s*[章节卷部篇回]?|pdf\s*分段)\b/i;
-const SPEECH_UNIT_IDEAL_CHARS = 150;
-const SPEECH_UNIT_MAX_CHARS = 280;
+const SPEECH_UNIT_IDEAL_CHARS = 240;
+const SPEECH_UNIT_MAX_CHARS = 360;
+const SPEECH_UNIT_LANG_STICKY_CHARS = 20;
 const EXTRA_VOICE_LIMIT = 8;
 const MAX_VISIBLE_VOICES = 14;
 const SPEECH_RESET_DELAY_MS = 80;
@@ -208,6 +211,7 @@ const state = {
   ocrLanguage: "eng+chi_sim",
   ocrWorker: null,
   ocrWorkerKey: "",
+  ocrEffectiveLanguage: "",
   speechAttemptNonce: 0,
   rateRestartTimer: 0,
   speechRestartTimer: 0,
@@ -222,6 +226,7 @@ const state = {
   sleepTimerId: 0,
   sleepTimerEndsAt: 0,
   boundaryFallbackTimers: [],
+  utteranceRefs: [],
   progressSaveTimer: 0,
   fontScale: 100,
   toneChosenByUser: false,
@@ -516,6 +521,7 @@ function wireEvents() {
 
   dom.ocrLanguageSelect.addEventListener("change", async () => {
     state.ocrLanguage = dom.ocrLanguageSelect.value;
+    state.ocrEffectiveLanguage = "";
     await terminateOcrWorker();
     refreshOcrHint();
     saveSettings();
@@ -879,6 +885,7 @@ async function parsePdfFile(file) {
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
   const pages = [];
   let ocrPageCount = 0;
+  state.ocrEffectiveLanguage = "";
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     setStatus(`PDF 解析中 ${pageNumber} / ${pdf.numPages}`);
@@ -1098,7 +1105,26 @@ function appendSectionText(previous, next) {
   if (!next) {
     return previous;
   }
-  return previous ? `${previous}\n\n${next}`.trim() : next.trim();
+  return previous ? joinFlowingText(previous, next) : next.trim();
+}
+
+// Joins two blocks of running text. When the first block stops mid-sentence
+// (typical for page breaks), the boundary is bridged instead of becoming a
+// paragraph break, so sentences are not torn apart.
+function joinFlowingText(previous, next) {
+  const left = (previous || "").trim();
+  const right = (next || "").trim();
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  if (hasStrongSentenceEnding(left) || isShortHeadingLine(left.split("\n").pop() || "") || HEADING_LINE_RE.test(right.split("\n", 1)[0] || "")) {
+    return `${left}\n\n${right}`;
+  }
+  const joiner = shouldInsertSpaceBetween(left, right) ? " " : "";
+  return `${left}${joiner}${right}`;
 }
 
 async function recognizePdfPage(page, pageNumber, totalPages) {
@@ -1126,22 +1152,37 @@ async function recognizePdfPage(page, pageNumber, totalPages) {
   await page.render({ canvasContext: context, viewport }).promise;
   const preparedCanvas = prepareCanvasForOcr(canvas);
   const firstResult = await recognizeWithOcrMode(worker, preparedCanvas, "3");
-  const result = isWeakOcrCandidate(firstResult) ? pickBetterOcrCandidate(firstResult, await recognizeWithOcrMode(worker, preparedCanvas, "6")) : firstResult;
+  // Re-running with another segmentation mode doubles per-page time, so
+  // only do it when the first pass produced almost nothing.
+  const needsRetry = countMeaningfulCharacters(firstResult.text) < OCR_RETRY_MIN_CHARS;
+  const result = needsRetry ? pickBetterOcrCandidate(firstResult, await recognizeWithOcrMode(worker, preparedCanvas, "6")) : firstResult;
   preparedCanvas.width = 0;
   preparedCanvas.height = 0;
   canvas.width = 0;
   canvas.height = 0;
-  return normalizeWhitespace(result.text || "");
+  const text = normalizeWhitespace(result.text || "");
+  maybeNarrowOcrLanguage(text);
+  return text;
+}
+
+function isMobileDevice() {
+  if (navigator.userAgentData?.mobile) {
+    return true;
+  }
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || "");
 }
 
 function calculateOcrRenderScale(baseViewport) {
   const width = Math.max(1, baseViewport.width || 1);
   const height = Math.max(1, baseViewport.height || 1);
   const longEdge = Math.max(width, height);
-  let scale = clamp(OCR_TARGET_LONG_EDGE / longEdge, OCR_RENDER_MIN_SCALE, OCR_RENDER_MAX_SCALE);
+  const mobile = isMobileDevice();
+  const targetLongEdge = mobile ? OCR_MOBILE_TARGET_LONG_EDGE : OCR_TARGET_LONG_EDGE;
+  const maxPixels = mobile ? OCR_MOBILE_MAX_PIXELS : OCR_MAX_PIXELS;
+  let scale = clamp(targetLongEdge / longEdge, OCR_RENDER_MIN_SCALE, OCR_RENDER_MAX_SCALE);
   const projectedPixels = width * height * scale * scale;
-  if (projectedPixels > OCR_MAX_PIXELS) {
-    scale *= Math.sqrt(OCR_MAX_PIXELS / projectedPixels);
+  if (projectedPixels > maxPixels) {
+    scale *= Math.sqrt(maxPixels / projectedPixels);
   }
   return clamp(scale, 1.1, OCR_RENDER_MAX_SCALE);
 }
@@ -1164,7 +1205,10 @@ function prepareCanvasForOcr(sourceCanvas) {
 
   const pixelCount = Math.max(1, data.length / 4);
   const average = luminanceSum / pixelCount;
-  const threshold = clamp(average - 12, 118, 210);
+  // Threshold is only used to locate the ink bounding box for cropping.
+  // The image itself stays grayscale: Tesseract's LSTM engine binarizes
+  // internally, and hard thresholding destroys thin CJK strokes.
+  const inkThreshold = clamp(average - 24, 96, 200);
   let minX = width;
   let minY = height;
   let maxX = 0;
@@ -1174,15 +1218,13 @@ function prepareCanvasForOcr(sourceCanvas) {
     for (let x = 0; x < width; x += 1) {
       const offset = (y * width + x) * 4;
       const luminance = data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114;
-      const contrasted = clamp((luminance - 128) * 1.22 + 128, 0, 255);
-      const ink = contrasted < threshold;
-      const value = ink ? 0 : 255;
-      data[offset] = value;
-      data[offset + 1] = value;
-      data[offset + 2] = value;
+      const gray = clamp(Math.round((luminance - 128) * 1.12 + 128), 0, 255);
+      data[offset] = gray;
+      data[offset + 1] = gray;
+      data[offset + 2] = gray;
       data[offset + 3] = 255;
 
-      if (ink) {
+      if (luminance < inkThreshold) {
         minX = Math.min(minX, x);
         minY = Math.min(minY, y);
         maxX = Math.max(maxX, x);
@@ -1218,20 +1260,13 @@ async function recognizeWithOcrMode(worker, canvas, pageSegMode) {
     preserve_interword_spaces: "1",
     tessedit_pageseg_mode: pageSegMode,
     user_defined_dpi: "300",
+    tessedit_do_invert: "0",
   });
   const result = await worker.recognize(canvas);
   return {
     text: normalizeWhitespace(result.data?.text || ""),
     confidence: Number(result.data?.confidence || 0),
   };
-}
-
-function isWeakOcrCandidate(candidate) {
-  const text = candidate?.text || "";
-  const meaningful = countMeaningfulCharacters(text);
-  const compactLength = text.replace(/\s/g, "").length || 1;
-  const symbolRatio = (text.match(/[^\sA-Za-z0-9\u4e00-\u9fa5，。！？；：、,.!?;:'"“”‘’\-]/g) || []).length / compactLength;
-  return meaningful < OCR_WEAK_MIN_CHARS || symbolRatio > OCR_SYMBOL_RATIO_LIMIT || (candidate.confidence > 0 && candidate.confidence < OCR_WEAK_CONFIDENCE);
 }
 
 function pickBetterOcrCandidate(left, right) {
@@ -1247,14 +1282,14 @@ function scoreOcrCandidate(candidate) {
 }
 
 async function ensureOcrWorker() {
-  const workerKey = state.ocrLanguage;
+  const workerKey = state.ocrEffectiveLanguage || state.ocrLanguage;
   if (state.ocrWorker && state.ocrWorkerKey === workerKey) {
     return state.ocrWorker;
   }
 
   await terminateOcrWorker();
-  setStatus(`正在准备 OCR（${OCR_LANGUAGE_LABELS[state.ocrLanguage] || "中英混合"}）`);
-  state.ocrWorker = await window.Tesseract.createWorker(getOcrLanguageArgument(state.ocrLanguage), 1, {
+  setStatus(`正在准备 OCR（${OCR_LANGUAGE_LABELS[workerKey] || "中英混合"}）`);
+  state.ocrWorker = await window.Tesseract.createWorker(getOcrLanguageArgument(workerKey), 1, {
     ...OCR_ASSET_PATHS,
     logger(message) {
       if (typeof message.progress === "number") {
@@ -1269,6 +1304,33 @@ async function ensureOcrWorker() {
   });
   state.ocrWorkerKey = workerKey;
   return state.ocrWorker;
+}
+
+function maybeNarrowOcrLanguage(text) {
+  if (state.ocrLanguage !== "eng+chi_sim" || state.ocrEffectiveLanguage) {
+    return;
+  }
+  if (countMeaningfulCharacters(text) < 60) {
+    return;
+  }
+  const cjkCount = (text.match(/[一-龥]/g) || []).length;
+  const latinCount = (text.match(/[A-Za-z]/g) || []).length;
+  const total = cjkCount + latinCount;
+  if (!total) {
+    return;
+  }
+  if (cjkCount >= total * 0.85) {
+    // Almost pure Chinese: a single model is both faster and more accurate.
+    state.ocrEffectiveLanguage = "chi_sim";
+  } else if (cjkCount >= total * 0.4) {
+    // Chinese-dominant mixed text: keep both models but put Chinese first.
+    state.ocrEffectiveLanguage = "chi_sim+eng";
+  } else if (latinCount >= total * 0.95) {
+    state.ocrEffectiveLanguage = "eng";
+  } else {
+    state.ocrEffectiveLanguage = state.ocrLanguage;
+  }
+  // The worker is re-created lazily by ensureOcrWorker when the key changes.
 }
 
 async function terminateOcrWorker() {
@@ -2136,6 +2198,13 @@ function clearBoundaryFallbackTimers() {
   state.boundaryFallbackTimers = [];
 }
 
+function releaseUtteranceRef(utterance) {
+  const index = state.utteranceRefs.indexOf(utterance);
+  if (index >= 0) {
+    state.utteranceRefs.splice(index, 1);
+  }
+}
+
 function scheduleBoundaryFallback(slicedUnit, attemptNonce) {
   clearBoundaryFallbackTimers();
   const boundaries = slicedUnit?.boundaries || [];
@@ -2191,8 +2260,12 @@ function splitPdfPagesIntoSections(pages, fallbackName) {
 
   pages.forEach((page, index) => {
     const heading = detectHeadingFromPage(page.text);
-    const shouldStartNewSection =
-      Boolean(heading) || !current || current.text.length > 2600 || current.pages.length >= 4;
+    // Splitting mid-sentence breaks the reading flow at every section edge,
+    // so length-based splits wait for a sentence boundary (with a hard cap).
+    const endsCleanly = !current || hasStrongSentenceEnding(current.text);
+    const lengthSplit = current && endsCleanly && (current.text.length > 2600 || current.pages.length >= 4);
+    const hardSplit = current && (current.text.length > 5200 || current.pages.length >= 7);
+    const shouldStartNewSection = Boolean(heading) || !current || lengthSplit || hardSplit;
 
     if (shouldStartNewSection) {
       if (current?.text.trim()) {
@@ -2206,7 +2279,7 @@ function splitPdfPagesIntoSections(pages, fallbackName) {
     }
 
     current.pages.push(page);
-    current.text = `${current.text}\n\n${page.text}`.trim();
+    current.text = joinFlowingText(current.text, page.text);
 
     if (index === pages.length - 1 && current.text.trim()) {
       sections.push(createPdfSection(current, sections.length));
@@ -2791,7 +2864,14 @@ function buildSpeechUnits(sentences) {
       return;
     }
 
-    const lang = detectSpeechLang(cleanSentence);
+    const detectedLang = detectSpeechLang(cleanSentence);
+    // Short fragments (numbers, brand names, isolated words) inherit the
+    // unit language: a per-fragment voice switch breaks playback continuity
+    // far more than reading a short token with the surrounding voice.
+    const lang =
+      current && detectedLang !== current.lang && cleanSentence.length <= SPEECH_UNIT_LANG_STICKY_CHARS
+        ? current.lang
+        : detectedLang;
     const shouldStartNew =
       !current ||
       lang !== current.lang ||
@@ -4354,6 +4434,7 @@ startSpeech = async function () {
 
 restartChapterSpeechFromIndex = async function (sentenceIndex) {
   const attemptNonce = ++state.speechAttemptNonce;
+  state.utteranceRefs = [];
   clearActiveAudio();
   await resetSpeechEngine();
   if (attemptNonce !== state.speechAttemptNonce) {
@@ -4365,19 +4446,28 @@ restartChapterSpeechFromIndex = async function (sentenceIndex) {
   speakSentenceAt(sentenceIndex, false, attemptNonce);
 };
 
-speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce = state.speechAttemptNonce, overrideVoice = null) {
+// Returns true when a browser utterance was actually queued into the speech
+// engine. With { queueOnly: true } the unit is appended to the engine queue
+// as look-ahead while the previous unit is still speaking, which removes the
+// per-sentence startup gap that makes mobile playback choppy.
+speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce = state.speechAttemptNonce, overrideVoice = null, options = {}) {
   if (attemptNonce !== state.speechAttemptNonce) {
-    return;
+    return false;
   }
   const sentences = getCurrentSentences();
   if (sentenceIndex >= sentences.length) {
+    if (options.queueOnly) {
+      // Chapter transitions are handled when the final utterance ends.
+      return false;
+    }
     const nextSectionIndex = findNextReadableSectionIndex(state.currentSectionIndex + 1);
     if (nextSectionIndex >= 0) {
       setCurrentSection(nextSectionIndex, { resetParagraph: true, resetSentence: true });
       dom.speechStateHint.textContent = `正在续读第 ${nextSectionIndex + 1} 章`;
       renderSpeechDiagnostics("自动续读下一章", `当前章节已读完，正在继续第 ${nextSectionIndex + 1} 章。`, "success");
-      void restartChapterSpeechFromIndex(0);
-      return;
+      // Continue directly: cancelling and resetting the engine here adds an
+      // audible pause between chapters.
+      return speakSentenceAt(0, false, attemptNonce);
     }
 
     state.speaking = false;
@@ -4386,7 +4476,7 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
     updateSpeechProgress();
     onSpeechPlaybackStopped();
-    return;
+    return false;
   }
 
   const speechUnit = getSpeechUnitForSentence(sentenceIndex);
@@ -4396,8 +4486,7 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   const sanitizedSpeechText = sanitizeTextForSpeech(speechText);
 
   if (!sanitizedSpeechText) {
-    speakSentenceAt(nextSentenceIndex + 1, fallbackTried, attemptNonce);
-    return;
+    return speakSentenceAt(nextSentenceIndex + 1, fallbackTried, attemptNonce, null, options);
   }
 
   const selectedVoice =
@@ -4424,20 +4513,17 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     scheduleBoundaryFallback(slicedUnit, attemptNonce);
     renderSpeechDiagnostics("浏览器已开始发声", `当前使用 ${voiceSource} ${voiceLabel}。`, "success");
   };
-  const onEnd = () => {
-    if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
-      return;
-    }
+  const advanceAfterEnd = () => {
     clearBoundaryFallbackTimers();
     state.currentSentenceIndex = nextSentenceIndex + 1;
     updateSpeechProgress();
-    speakSentenceAt(nextSentenceIndex + 1, false, attemptNonce);
   };
   const onError = async (event) => {
     if (attemptNonce !== state.speechAttemptNonce) {
       return;
     }
     state.activeUtterance = null;
+    clearBoundaryFallbackTimers();
     if (!fallbackTried) {
       const fallback = resolveFallbackVoiceForFailure(selectedVoice, sanitizedSpeechText);
       if (fallback?.voice) {
@@ -4446,9 +4532,26 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
           `${voiceLabel} 没有成功播放，正在改用${fallback.reason} ${fallback.voice.name || "默认声音"} 继续当前句。`,
           "warning",
         );
-        speakSentenceAt(sentenceIndex, true, attemptNonce, fallback.voice);
+        // Invalidate any look-ahead utterances before retrying, otherwise the
+        // queued next unit would play on top of the retried current unit.
+        const retryNonce = ++state.speechAttemptNonce;
+        state.utteranceRefs = [];
+        if ("speechSynthesis" in window) {
+          window.speechSynthesis.cancel();
+        }
+        window.setTimeout(() => {
+          if (retryNonce !== state.speechAttemptNonce) {
+            return;
+          }
+          speakSentenceAt(sentenceIndex, true, retryNonce, fallback.voice);
+        }, SPEECH_RESET_DELAY_MS);
         return;
       }
+    }
+    state.speechAttemptNonce += 1;
+    state.utteranceRefs = [];
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
     }
     state.speaking = false;
     state.paused = false;
@@ -4458,28 +4561,52 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   };
 
   if (selectedVoice && isBridgeVoice(selectedVoice)) {
+    if (options.queueOnly) {
+      // Bridge audio is fetched on demand and cannot sit in the engine
+      // queue; it chains sequentially from the previous unit's end instead.
+      return false;
+    }
     void playBridgeVoiceAudio(speechText, selectedVoice, {
       nonce: attemptNonce,
       onstart: onStart,
-      onend: onEnd,
+      onend: () => {
+        if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
+          return;
+        }
+        advanceAfterEnd();
+        speakSentenceAt(nextSentenceIndex + 1, false, attemptNonce);
+      },
       onerror: onError,
     }).catch(() => {
       void onError();
     });
-    return;
+    return true;
   }
 
   if (!("speechSynthesis" in window)) {
     void onError();
-    return;
+    return false;
   }
 
   const utterance = buildSpeechUtterance(speechText, selectedVoice);
-  state.activeUtterance = utterance;
+  if (!options.queueOnly) {
+    state.activeUtterance = utterance;
+  }
+  // Keep a strong reference: Chrome garbage-collects pending utterances
+  // otherwise, silently dropping their events.
+  state.utteranceRefs.push(utterance);
   utterance.rate = clamp(state.rate, 0.5, 3.0);
   utterance.pitch = mapUiPitchToBrowserPitch(state.pitch);
   utterance.volume = 1;
-  utterance.onstart = onStart;
+  let queuedAhead = false;
+  utterance.onstart = () => {
+    if (attemptNonce !== state.speechAttemptNonce) {
+      return;
+    }
+    state.activeUtterance = utterance;
+    onStart();
+    queuedAhead = speakSentenceAt(nextSentenceIndex + 1, false, attemptNonce, null, { queueOnly: true }) === true;
+  };
   utterance.onboundary = (event) => {
     if (typeof event?.charIndex === "number" && slicedUnit?.boundaries?.length) {
       if (!boundaryEventSeen) {
@@ -4489,14 +4616,26 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
       syncSpeechBoundary(slicedUnit.boundaries, event.charIndex);
     }
   };
-  utterance.onend = onEnd;
+  utterance.onend = () => {
+    releaseUtteranceRef(utterance);
+    if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
+      return;
+    }
+    advanceAfterEnd();
+    if (!queuedAhead) {
+      speakSentenceAt(nextSentenceIndex + 1, false, attemptNonce);
+    }
+  };
   utterance.onerror = () => {
+    releaseUtteranceRef(utterance);
     void onError();
   };
   if (attemptNonce !== state.speechAttemptNonce) {
-    return;
+    releaseUtteranceRef(utterance);
+    return false;
   }
   window.speechSynthesis.speak(utterance);
+  return true;
 };
 
 togglePause = async function () {
@@ -4537,6 +4676,7 @@ togglePause = async function () {
 
 stopSpeech = function (options = {}) {
   state.speechAttemptNonce += 1;
+  state.utteranceRefs = [];
   window.clearTimeout(state.rateRestartTimer);
   window.clearTimeout(state.speechRestartTimer);
   clearActiveAudio();
