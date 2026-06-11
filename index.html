@@ -38,6 +38,7 @@
         </div>
         <div class="hero-actions">
           <label class="upload-button" for="book-file-input">导入书籍</label>
+          <button class="ghost-button" id="wechat-help-button" type="button">导入微信文件</button>
           <button class="ghost-button" id="load-demo-button" type="button">加载演示书</button>
         </div>
         <input
@@ -312,6 +313,10 @@
             <p>首次识别需要加载几 MB 的识别模型，之后会快很多。清晰、摆正、单栏排版的扫描件效果最好；拍照倾斜、分辨率低、双栏、手写体或水印严重的页面识别效果会明显下降。可以在「色调与识别」里切换识别语言（默认中英混合，会按内容自动优化）。</p>
           </details>
           <details>
+            <summary>怎么导入微信里收到的文件？</summary>
+            <p>微信聊天文件需要先保存出来再导入：安卓在微信里打开文件 → 「···」→「保存到手机」，然后在系统文件管理的「Download/WeiXin」里把文件「分享」给 iStone Reader（需先安装到主屏幕）；iPhone 在微信里选「用其他应用打开 → 存储到"文件"」，再用「导入书籍」从"文件"里选取。点顶部「导入微信文件」按钮可查看带步骤的完整指引。</p>
+          </details>
+          <details>
             <summary>我的书和进度存在哪里？会上传吗？</summary>
             <p>不会上传。文件解析、识别和朗读全部在你自己的设备上完成，书架和进度只保存在本机浏览器里。注意：清除浏览器数据（或无痕模式）会清空书架；换设备或换浏览器不会同步。</p>
           </details>
@@ -324,6 +329,34 @@
         <p class="help-footnote">遇到其他问题，可以先点「测试发声」和「加载演示书」排查是设备问题还是文件问题。</p>
       </section>
     </main>
+
+    <dialog class="wechat-dialog" id="wechat-dialog">
+      <div class="wechat-dialog-head">
+        <h3>导入微信里收到的文件</h3>
+        <button class="ghost-button wechat-dialog-close" id="wechat-dialog-close" type="button">关闭</button>
+      </div>
+      <p class="wechat-dialog-note">
+        微信聊天里的文件存放在微信自己的空间里，网页无法直接读取，需要先「保存出来」再导入。请按你的手机类型操作：
+      </p>
+      <section class="wechat-platform" id="wechat-steps-android">
+        <h4>安卓手机</h4>
+        <ol>
+          <li>在微信里点开那个文件，点右上角「···」，选择<strong>「保存到手机」</strong>（部分机型叫「存储到手机」）。</li>
+          <li>最快的方式：打开系统<strong>「文件管理」</strong>，进入「下载 / Download / WeiXin」文件夹，长按文件选<strong>「分享 / 发送」</strong>，在分享列表里选择 <strong>iStone Reader</strong>，会直接导入并开始解析。<br /><span class="wechat-tip">前提：已把本应用「添加到主屏幕 / 安装应用」。如果分享列表里没有 iStone Reader，请先安装。</span></li>
+          <li>备选方式：回到本页点「导入书籍」，在文件选择器里进入「下载（Download）」下的 <strong>WeiXin</strong> 文件夹选取文件。</li>
+        </ol>
+      </section>
+      <section class="wechat-platform" id="wechat-steps-ios">
+        <h4>iPhone / iPad</h4>
+        <ol>
+          <li>在微信里点开那个文件，点右上角「···」，选择<strong>「用其他应用打开」</strong>，然后选<strong>「存储到"文件"」</strong>并保存。</li>
+          <li>回到本页点「导入书籍」，在弹出的"文件"界面里打开<strong>「最近项目」</strong>或刚才保存的位置，点选文件即可。</li>
+        </ol>
+      </section>
+      <p class="wechat-dialog-note">
+        提示：请不要在微信内置浏览器里使用本应用（限制较多且无法朗读），建议用系统浏览器打开并添加到主屏幕。
+      </p>
+    </dialog>
 
     <script src="./vendor/jszip.min.js"></script>
     <script src="./vendor/epub.min.js"></script>

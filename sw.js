@@ -1,4 +1,4 @@
-const CACHE_NAME = "istone-reader-pwa-v23";
+const CACHE_NAME = "istone-reader-pwa-v24";
 const SHARED_BOOK_URL = new URL("./shared-book", self.registration.scope).toString();
 const SHARE_TARGET_PATH = new URL("./share-target", self.registration.scope).pathname;
 const CORE_ASSETS = [
@@ -72,8 +72,10 @@ self.addEventListener("fetch", (event) => {
       ["/", "/index.html", "/app.js", "/library.js", "/styles.css", "/manifest.webmanifest", "/sw.js"].includes(url.pathname));
 
   if (isLiveAsset) {
+    // Force revalidation with the server: some mobile browsers (and the
+    // WeChat webview) keep serving a stale HTTP-cached copy otherwise.
     event.respondWith(
-      fetch(event.request)
+      fetch(event.request.url, { cache: "no-cache", credentials: "same-origin" })
         .then((response) => {
           const copy = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => Promise.resolve());

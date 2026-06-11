@@ -291,6 +291,11 @@ const dom = {
   nextSentenceButton: document.getElementById("next-sentence-button"),
   fontSizeRange: document.getElementById("font-size-range"),
   fontSizeValue: document.getElementById("font-size-value"),
+  wechatHelpButton: document.getElementById("wechat-help-button"),
+  wechatDialog: document.getElementById("wechat-dialog"),
+  wechatDialogClose: document.getElementById("wechat-dialog-close"),
+  wechatStepsAndroid: document.getElementById("wechat-steps-android"),
+  wechatStepsIos: document.getElementById("wechat-steps-ios"),
 };
 
 bootstrap();
@@ -470,6 +475,18 @@ function wireEvents() {
 
   dom.sleepTimerSelect?.addEventListener("change", () => {
     applySleepTimerSelection();
+  });
+
+  dom.wechatHelpButton?.addEventListener("click", () => {
+    openWechatHelpDialog();
+  });
+  dom.wechatDialogClose?.addEventListener("click", () => {
+    closeWechatHelpDialog();
+  });
+  dom.wechatDialog?.addEventListener("click", (event) => {
+    if (event.target === dom.wechatDialog) {
+      closeWechatHelpDialog();
+    }
   });
 
   dom.fontSizeRange?.addEventListener("input", () => {
@@ -2181,6 +2198,33 @@ function applySleepTimerSelection() {
     setStatus("定时关闭：朗读已停止");
   }, minutes * 60_000);
   setStatus(`定时关闭已设定：${minutes} 分钟后停止朗读`);
+}
+
+function openWechatHelpDialog() {
+  if (!dom.wechatDialog) {
+    return;
+  }
+  // Show the reader's own platform first.
+  const isIos = /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+  if (isIos && dom.wechatStepsIos && dom.wechatStepsAndroid) {
+    dom.wechatStepsIos.parentNode.insertBefore(dom.wechatStepsIos, dom.wechatStepsAndroid);
+  }
+  if (typeof dom.wechatDialog.showModal === "function" && !dom.wechatDialog.open) {
+    dom.wechatDialog.showModal();
+  } else {
+    dom.wechatDialog.setAttribute("open", "");
+  }
+}
+
+function closeWechatHelpDialog() {
+  if (!dom.wechatDialog) {
+    return;
+  }
+  if (typeof dom.wechatDialog.close === "function") {
+    dom.wechatDialog.close();
+  } else {
+    dom.wechatDialog.removeAttribute("open");
+  }
 }
 
 function applyFontScale() {
