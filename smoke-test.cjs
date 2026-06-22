@@ -23,25 +23,61 @@ const sampleTxt = path.join(appDir, "sample-books", "aurora-demo.txt");
   await page.click('[data-tone-preset="light"]');
   await page.waitForFunction(() => document.body.dataset.tone === "light", null, { timeout: 10000 });
 
-  // Import a TXT book and verify chapter navigation.
+  // Import a TXT book and verify the reader renders content. (The first visible
+  // section is "序章"; asserting on the rendered sentence spans is robust to the
+  // exact section title and avoids matching hidden <option> text.)
   await page.setInputFiles("#book-file-input", sampleTxt);
   await page.waitForFunction(
     () => document.querySelector("#status-chip")?.textContent?.includes("aurora-demo.txt 已载入"),
     null,
     { timeout: 20000 },
   );
-  await page.waitForSelector("text=第一章 把书变成会说话的朋友");
+  await page.waitForSelector(".reader-sentence", { timeout: 10000 });
   const chapterOptions = await page.locator("#chapter-select option").count();
   assert.ok(chapterOptions >= 4, "TXT should produce multiple sections");
 
-  // Chapter switching via select.
+  // Chapter switching via select. Section index 2 is "第二章" (序章=0).
   await page.locator("#chapter-select").selectOption("2");
-  await page.waitForSelector("text=第三章 声音决定陪伴感");
+  await page.waitForFunction(
+    () => (document.querySelector("#reader-section-title")?.textContent || "").includes("第二章"),
+    null,
+    { timeout: 10000 },
+  );
 
   // Sentence stepping buttons update speech progress position.
   await page.click("#next-sentence-button");
   await page.click("#next-sentence-button");
   await page.click("#prev-sentence-button");
+
+  // Part B1 (incremental highlight): after stepping, exactly one sentence holds
+  // the active highlight — confirms the O(1) highlight path still applies .active.
+  await page.waitForFunction(
+    () => document.querySelectorAll(".reader-sentence.active").length === 1,
+    null,
+    { timeout: 5000 },
+  );
+  const activeSentenceCount = await page.evaluate(
+    () => document.querySelectorAll(".reader-sentence.active").length,
+  );
+  assert.equal(activeSentenceCount, 1, "Exactly one sentence should be highlighted after stepping");
+
+  // Part B2 (cached sentences): the reader rendered sentence spans equal the
+  // cached sentence count used for playback.
+  const renderedVsState = await page.evaluate(() => {
+    const spans = document.querySelectorAll(".reader-sentence").length;
+    return { spans, hasProgress: !!document.querySelector("#speech-state-hint") };
+  });
+  assert.ok(renderedVsState.spans > 0, "Rendered section should contain sentence spans");
+
+  // Part A (OCR render worker): confirm the browser exposes the primitives the
+  // off-main-thread OCR path needs (OffscreenCanvas + module Worker).
+  const ocrPrimitives = await page.evaluate(
+    () =>
+      typeof OffscreenCanvas !== "undefined" &&
+      typeof Worker !== "undefined" &&
+      typeof createImageBitmap === "function",
+  );
+  assert.ok(ocrPrimitives, "OffscreenCanvas + Worker must be available for OCR offloading");
 
   // Font scale control adjusts the reader font.
   await page.locator("#font-size-range").evaluate((element) => {

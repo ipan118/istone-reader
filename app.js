@@ -212,6 +212,10 @@ const state = {
   ocrWorker: null,
   ocrWorkerKey: "",
   ocrEffectiveLanguage: "",
+  // OCR render worker (OffscreenCanvas + pdf.js, off main thread).
+  ocrRenderWorker: null,
+  ocrRenderLoaded: false,
+  ocrRenderLoadSeq: 0,
   speechAttemptNonce: 0,
   rateRestartTimer: 0,
   speechRestartTimer: 0,
@@ -230,6 +234,19 @@ const state = {
   progressSaveTimer: 0,
   fontScale: 100,
   toneChosenByUser: false,
+  // Incremental read-along highlight (Part B): we track the active elements
+  // directly and cache the sentence text so boundary events no longer rebuild
+  // DOM arrays on every word.
+  activeSentenceEl: null,
+  activeParagraphEl: null,
+  sentenceElByIndex: new Map(),
+  paragraphElByIndex: new Map(),
+  sentenceTexts: [],
+  lastScrollAt: 0,
+  // Calibrated boundary-fallback timing: exponentially-averaged ms-per-char,
+  // learned from real onstart→onend durations so highlight tracks voices that
+  // never emit boundary events (common for Chinese voices).
+  speechMsPerCharEwma: 0,
 };
 
 const dom = {
@@ -334,6 +351,7 @@ async function bootstrap() {
   void importSharedBookIfAvailable();
   window.addEventListener("beforeunload", () => {
     terminateOcrWorker();
+    void terminateOcrRenderWorker();
     void persistProgressNow();
   });
   void refreshLibraryUi();
@@ -461,6 +479,8 @@ function wireEvents() {
 
   dom.rateRange?.addEventListener("input", () => {
     state.rate = clamp(Number(dom.rateRange.value), 0.5, 3.0);
+    // Rate changed: the calibrated ms/char is now stale, let it re-learn.
+    state.speechMsPerCharEwma = 0;
     dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
     applyRateChangeDuringPlayback();
     saveSettings();
@@ -899,32 +919,51 @@ async function parseTextFile(file) {
 
 async function parsePdfFile(file) {
   const buffer = await file.arrayBuffer();
+  // pdf.js transfers the buffer into its own worker, so keep an independent copy
+  // up front for the OCR render worker (which needs its own pdf.js document).
+  // Only bother when OCR may actually run and the render worker is supported.
+  const ocrRenderBuffer = supportsOcrRenderWorker() && state.ocrMode !== "off" ? buffer.slice(0) : null;
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
   const pages = [];
   let ocrPageCount = 0;
   state.ocrEffectiveLanguage = "";
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    setStatus(`PDF 解析中 ${pageNumber} / ${pdf.numPages}`);
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-    let text = normalizeWhitespace(pdfTextItemsToString(content.items));
-    let ocrUsed = false;
+  let ocrRenderLoaded = false;
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      setStatus(`PDF 解析中 ${pageNumber} / ${pdf.numPages}`);
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      let text = normalizeWhitespace(pdfTextItemsToString(content.items));
+      let ocrUsed = false;
 
-    if (shouldRunOcr(text)) {
-      const ocrText = await recognizePdfPage(page, pageNumber, pdf.numPages);
-      if (ocrText) {
-        text = repairOcrLineBreaks(ocrText);
-        ocrUsed = true;
-        ocrPageCount += 1;
+      if (shouldRunOcr(text)) {
+        if (!ocrRenderLoaded && ocrRenderBuffer) {
+          try {
+            ocrRenderLoaded = await loadOcrRenderDocument(ocrRenderBuffer);
+          } catch (error) {
+            console.warn("OCR render worker load failed:", error);
+            ocrRenderLoaded = false;
+          }
+        }
+        const ocrText = await recognizePdfPage(page, pageNumber, pdf.numPages);
+        if (ocrText) {
+          text = repairOcrLineBreaks(ocrText);
+          ocrUsed = true;
+          ocrPageCount += 1;
+        }
       }
-    }
 
-    pages.push({
-      pageNumber,
-      text,
-      ocrUsed,
-    });
+      pages.push({
+        pageNumber,
+        text,
+        ocrUsed,
+      });
+    }
+  } finally {
+    // Always release the render worker's document so its memory is freed even
+    // if parsing throws or the user cancels.
+    void releaseOcrRenderDocument();
   }
 
   const hasText = pages.some((page) => page.text.trim());
@@ -1144,6 +1183,133 @@ function joinFlowingText(previous, next) {
   return `${left}${joiner}${right}`;
 }
 
+// --- OCR render worker (OffscreenCanvas + pdf.js, off the main thread) ---
+// The worker does page rendering and pixel preprocessing; Tesseract recognition
+// still runs in its own worker. The main thread only shuttles prepared page
+// images (as PNG Blobs) into Tesseract.
+let ocrRenderRequestId = 0;
+const ocrRenderPending = new Map();
+
+function supportsOcrRenderWorker() {
+  return (
+    typeof OffscreenCanvas !== "undefined" &&
+    typeof Worker !== "undefined" &&
+    typeof OffscreenCanvas.prototype.convertToBlob === "function"
+  );
+}
+
+function ensureOcrRenderWorker() {
+  if (state.ocrRenderWorker || !supportsOcrRenderWorker()) {
+    return state.ocrRenderWorker;
+  }
+  try {
+    const worker = new Worker(new URL("./ocr-render-worker.js", import.meta.url), { type: "module" });
+    worker.addEventListener("message", (event) => {
+      const message = event.data;
+      if (!message || typeof message !== "object") {
+        return;
+      }
+      const pending = ocrRenderPending.get(message.id);
+      if (!pending) {
+        return;
+      }
+      ocrRenderPending.delete(message.id);
+      if (message.type === "error") {
+        pending.reject(new Error(message.message || "ocr-render-worker error"));
+      } else {
+        pending.resolve(message);
+      }
+    });
+    worker.addEventListener("error", (event) => {
+      const error = new Error(event?.message || "ocr-render-worker crashed");
+      for (const pending of ocrRenderPending.values()) {
+        try {
+          pending.reject(error);
+        } catch {
+          // Ignore reject races.
+        }
+      }
+      ocrRenderPending.clear();
+      state.ocrRenderWorker = null;
+      state.ocrRenderLoaded = false;
+    });
+    state.ocrRenderWorker = worker;
+    state.ocrRenderLoaded = false;
+    return worker;
+  } catch {
+    state.ocrRenderWorker = null;
+    state.ocrRenderLoaded = false;
+    return null;
+  }
+}
+
+function sendOcrRenderMessage(payload, transfer = []) {
+  const worker = state.ocrRenderWorker;
+  if (!worker) {
+    return Promise.reject(new Error("ocr-render-worker unavailable"));
+  }
+  const id = ++ocrRenderRequestId;
+  return new Promise((resolve, reject) => {
+    ocrRenderPending.set(id, { resolve, reject });
+    worker.postMessage({ ...payload, id }, transfer);
+  });
+}
+
+async function loadOcrRenderDocument(buffer) {
+  const worker = ensureOcrRenderWorker();
+  if (!worker) {
+    return false;
+  }
+  if (state.ocrRenderLoaded) {
+    return true;
+  }
+  await sendOcrRenderMessage({ type: "load", buffer }, [buffer]);
+  state.ocrRenderLoaded = true;
+  return true;
+}
+
+async function renderOcrPageBlob(pageNumber, mobile) {
+  if (!state.ocrRenderWorker || !state.ocrRenderLoaded) {
+    return null;
+  }
+  const response = await sendOcrRenderMessage({ type: "render", pageNumber, mobile });
+  return response?.blob || null;
+}
+
+async function reRenderOcrPageBlob(pageNumber, mobile) {
+  if (!state.ocrRenderWorker || !state.ocrRenderLoaded) {
+    return null;
+  }
+  const response = await sendOcrRenderMessage({ type: "rebitmap", pageNumber, mobile });
+  return response?.type === "rendered" ? response.blob : null;
+}
+
+async function releaseOcrRenderDocument() {
+  state.ocrRenderLoaded = false;
+  if (!state.ocrRenderWorker) {
+    return;
+  }
+  try {
+    await sendOcrRenderMessage({ type: "release" });
+  } catch {
+    // Release is best-effort; ignore failures.
+  }
+}
+
+async function terminateOcrRenderWorker() {
+  state.ocrRenderLoaded = false;
+  const worker = state.ocrRenderWorker;
+  state.ocrRenderWorker = null;
+  ocrRenderPending.clear();
+  if (worker) {
+    try {
+      await worker.terminate();
+    } catch {
+      // Ignore shutdown failures.
+    }
+  }
+}
+
 async function recognizePdfPage(page, pageNumber, totalPages) {
   if (!window.Tesseract) {
     if (state.ocrMode === "always") {
@@ -1153,6 +1319,38 @@ async function recognizePdfPage(page, pageNumber, totalPages) {
   }
 
   const worker = await ensureOcrWorker();
+  const mobile = isMobileDevice();
+  setStatus(`扫描识别中 ${pageNumber} / ${totalPages}`);
+
+  // Preferred path: render + preprocess in the OCR render worker (OffscreenCanvas
+  // + pdf.js), so neither the pdf.js render nor the pixel loop blocks the UI.
+  // The worker returns a PNG Blob that tesseract.js recognizes directly.
+  if (state.ocrRenderWorker && state.ocrRenderLoaded) {
+    try {
+      const blob = await renderOcrPageBlob(pageNumber, mobile);
+      if (blob) {
+        const firstResult = await recognizeWithOcrMode(worker, blob, "3");
+        let result = firstResult;
+        const needsRetry = countMeaningfulCharacters(firstResult.text) < OCR_RETRY_MIN_CHARS;
+        if (needsRetry) {
+          const retryBlob = await reRenderOcrPageBlob(pageNumber, mobile);
+          if (retryBlob) {
+            result = pickBetterOcrCandidate(firstResult, await recognizeWithOcrMode(worker, retryBlob, "6"));
+          }
+        }
+        const text = normalizeWhitespace(result.text || "");
+        maybeNarrowOcrLanguage(text);
+        return text;
+      }
+    } catch (error) {
+      // If the render worker misbehaves, release it and fall through to the
+      // main-thread path so OCR still works.
+      console.warn("OCR render worker failed, falling back to main thread:", error);
+      await releaseOcrRenderDocument();
+    }
+  }
+
+  // Fallback: render + preprocess on the main thread (older browsers / WebViews).
   const baseViewport = page.getViewport({ scale: 1 });
   const scale = calculateOcrRenderScale(baseViewport);
   const viewport = page.getViewport({ scale });
@@ -1165,7 +1363,6 @@ async function recognizePdfPage(page, pageNumber, totalPages) {
     return "";
   }
 
-  setStatus(`扫描识别中 ${pageNumber} / ${totalPages}`);
   await page.render({ canvasContext: context, viewport }).promise;
   const preparedCanvas = prepareCanvasForOcr(canvas);
   const firstResult = await recognizeWithOcrMode(worker, preparedCanvas, "3");
@@ -1204,6 +1401,10 @@ function calculateOcrRenderScale(baseViewport) {
   return clamp(scale, 1.1, OCR_RENDER_MAX_SCALE);
 }
 
+// Fallback preprocessing used when the OCR render worker is unavailable. Same
+// single-pass, threshold-free algorithm as the worker: one loop writes the
+// contrast-stretched grayscale and accumulates per-row/column darkness mass;
+// the ink bbox is derived from the projections (robust to uneven lighting).
 function prepareCanvasForOcr(sourceCanvas) {
   const sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true });
   if (!sourceContext) {
@@ -1212,45 +1413,84 @@ function prepareCanvasForOcr(sourceCanvas) {
 
   const width = sourceCanvas.width;
   const height = sourceCanvas.height;
+  if (!width || !height) {
+    return sourceCanvas;
+  }
+
   const image = sourceContext.getImageData(0, 0, width, height);
   const data = image.data;
-  let luminanceSum = 0;
+  const rowDark = new Float32Array(height);
+  const colDark = new Float32Array(width);
 
-  for (let index = 0; index < data.length; index += 4) {
-    luminanceSum += data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+  let index = 0;
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      const luminance = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114;
+      const gray = clamp(Math.round((luminance - 128) * 1.12 + 128), 0, 255);
+      data[index] = gray;
+      data[index + 1] = gray;
+      data[index + 2] = gray;
+      data[index + 3] = 255;
+      const dark = 255 - luminance;
+      rowSum += dark;
+      colDark[x] += dark;
+      index += 4;
+    }
+    rowDark[y] = rowSum;
+  }
+  sourceContext.putImageData(image, 0, 0);
+
+  const crop = computeInkCropFromProjections(rowDark, colDark, width, height);
+  if (!crop) {
+    return sourceCanvas;
   }
 
-  const pixelCount = Math.max(1, data.length / 4);
-  const average = luminanceSum / pixelCount;
-  // Threshold is only used to locate the ink bounding box for cropping.
-  // The image itself stays grayscale: Tesseract's LSTM engine binarizes
-  // internally, and hard thresholding destroys thin CJK strokes.
-  const inkThreshold = clamp(average - 24, 96, 200);
-  let minX = width;
-  let minY = height;
-  let maxX = 0;
-  let maxY = 0;
+  const preparedCanvas = document.createElement("canvas");
+  preparedCanvas.width = crop.width;
+  preparedCanvas.height = crop.height;
+  preparedCanvas.getContext("2d")?.drawImage(sourceCanvas, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+  return preparedCanvas;
+}
 
+// Ink bbox from darkness-mass projections: a row/column counts as ink when its
+// darkness mass exceeds 6% of the densest line's. The useful-crop guard keeps
+// us from over-cropping full-bleed pages while still trimming real margins.
+function computeInkCropFromProjections(rowDark, colDark, width, height) {
+  let maxRow = 0;
   for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const offset = (y * width + x) * 4;
-      const luminance = data[offset] * 0.299 + data[offset + 1] * 0.587 + data[offset + 2] * 0.114;
-      const gray = clamp(Math.round((luminance - 128) * 1.12 + 128), 0, 255);
-      data[offset] = gray;
-      data[offset + 1] = gray;
-      data[offset + 2] = gray;
-      data[offset + 3] = 255;
-
-      if (luminance < inkThreshold) {
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      }
+    if (rowDark[y] > maxRow) {
+      maxRow = rowDark[y];
     }
   }
+  let maxCol = 0;
+  for (let x = 0; x < width; x += 1) {
+    if (colDark[x] > maxCol) {
+      maxCol = colDark[x];
+    }
+  }
+  const rowThreshold = maxRow * 0.06;
+  const colThreshold = maxCol * 0.06;
 
-  sourceContext.putImageData(image, 0, 0);
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    if (rowDark[y] > rowThreshold) {
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    if (colDark[x] > colThreshold) {
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+    }
+  }
+  if (maxX < 0 || maxY < 0) {
+    return null;
+  }
 
   const padding = Math.round(Math.min(width, height) * 0.025);
   const cropX = clamp(minX - padding, 0, width - 1);
@@ -1259,17 +1499,12 @@ function prepareCanvasForOcr(sourceCanvas) {
   const cropBottom = clamp(maxY + padding, 1, height);
   const cropWidth = cropRight - cropX;
   const cropHeight = cropBottom - cropY;
-  const hasUsefulCrop = cropWidth > width * 0.25 && cropHeight > height * 0.25 && cropWidth * cropHeight < width * height * 0.96;
-
+  const hasUsefulCrop =
+    cropWidth > width * 0.25 && cropHeight > height * 0.25 && cropWidth * cropHeight < width * height * 0.96;
   if (!hasUsefulCrop) {
-    return sourceCanvas;
+    return null;
   }
-
-  const preparedCanvas = document.createElement("canvas");
-  preparedCanvas.width = cropWidth;
-  preparedCanvas.height = cropHeight;
-  preparedCanvas.getContext("2d")?.drawImage(sourceCanvas, cropX, cropY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-  return preparedCanvas;
+  return { x: cropX, y: cropY, width: cropWidth, height: cropHeight };
 }
 
 async function recognizeWithOcrMode(worker, canvas, pageSegMode) {
@@ -1671,6 +1906,10 @@ function renderCurrentSection() {
   const paragraphs = getParagraphsFromSection(section);
   const sentenceMap = [];
   const sentenceStarts = [];
+  // Element index maps let boundary events highlight in O(1) instead of
+  // re-running querySelectorAll over every sentence on every word.
+  const sentenceElByIndex = new Map();
+  const paragraphElByIndex = new Map();
   dom.readerBody.innerHTML = "";
   const flowPanel = document.createElement("article");
   flowPanel.className = "reader-flow-panel";
@@ -1679,6 +1918,7 @@ function renderCurrentSection() {
     const paragraph = document.createElement("p");
     paragraph.className = "reader-paragraph";
     paragraph.dataset.paragraphIndex = String(paragraphIndex);
+    paragraphElByIndex.set(paragraphIndex, paragraph);
 
     sentenceStarts.push(sentenceMap.length);
     const paragraphSentences = splitIntoSentences(paragraphText);
@@ -1689,6 +1929,7 @@ function renderCurrentSection() {
       span.className = "reader-sentence";
       span.dataset.sentenceIndex = String(sentenceIndex);
       span.textContent = sentence;
+      sentenceElByIndex.set(sentenceIndex, span);
       paragraph.appendChild(span);
       const nextSentence = paragraphSentences[sentencePosition + 1];
       if (nextSentence && shouldInsertSpaceBetween(sentence, nextSentence)) {
@@ -1703,6 +1944,11 @@ function renderCurrentSection() {
 
   state.currentSentenceStarts = sentenceStarts;
   state.renderedSentenceCount = sentenceMap.length;
+  state.sentenceTexts = sentenceMap;
+  state.sentenceElByIndex = sentenceElByIndex;
+  state.paragraphElByIndex = paragraphElByIndex;
+  state.activeSentenceEl = null;
+  state.activeParagraphEl = null;
   state.speechUnits = buildSpeechUnits(sentenceMap);
   state.currentParagraphIndex = clamp(state.currentParagraphIndex, 0, Math.max(0, paragraphs.length - 1));
   state.currentSentenceIndex = clamp(state.currentSentenceIndex, 0, Math.max(0, state.renderedSentenceCount - 1));
@@ -1751,9 +1997,9 @@ function updateProgressDisplays() {
   refreshReaderDashboardMeta(paragraphs, bookPercent);
   dom.positionRange.value = String(clamp(state.currentParagraphIndex, 0, Math.max(0, paragraphs.length - 1)));
   dom.positionRangeLabel.textContent = `${Math.min(paragraphs.length, state.currentParagraphIndex + 1)} / ${paragraphs.length || 0}`;
-  renderJumpButtons(dom.positionDotRow, paragraphs.length, state.currentParagraphIndex, (point) => {
-    jumpToParagraph(point);
-  });
+  // The quick-point dot row lives inside a visually-hidden container, so we skip
+  // rebuilding it here (it was rebuilt on every boundary event before, for no
+  // visible effect). It is still (re)built in renderCurrentSection.
 }
 
 function updateSpeechProgress() {
@@ -1874,31 +2120,43 @@ function renderJumpButtons(container, totalCount, activeIndex, onJump) {
 }
 
 function highlightParagraphAndScroll(index, options = { smooth: true }) {
-  const paragraphs = [...dom.readerBody.querySelectorAll(".reader-paragraph")];
-  paragraphs.forEach((paragraph) => {
-    paragraph.classList.toggle("active", Number(paragraph.dataset.paragraphIndex) === index);
-  });
-  const target = paragraphs.find((paragraph) => Number(paragraph.dataset.paragraphIndex) === index);
+  const target = state.paragraphElByIndex.get(index) || null;
+  if (target === state.activeParagraphEl) {
+    return;
+  }
+  state.activeParagraphEl?.classList.remove("active");
+  state.activeParagraphEl = target;
   if (target) {
+    target.classList.add("active");
     target.scrollIntoView({ behavior: options.smooth ? "smooth" : "auto", block: "nearest" });
   }
 }
 
 function highlightSentence(index, options = { smooth: true }) {
-  const sentences = [...dom.readerBody.querySelectorAll(".reader-sentence")];
-  sentences.forEach((sentence) => {
-    sentence.classList.toggle("active", Number(sentence.dataset.sentenceIndex) === index);
-  });
-
-  const activeSentence = sentences.find((sentence) => Number(sentence.dataset.sentenceIndex) === index);
-  if (activeSentence) {
-    const paragraph = activeSentence.closest(".reader-paragraph");
-    if (paragraph) {
-      state.currentParagraphIndex = Number(paragraph.dataset.paragraphIndex);
-      highlightParagraphAndScroll(state.currentParagraphIndex, options);
-      updateProgressDisplays();
-    }
+  const target = state.sentenceElByIndex.get(index) || null;
+  // Boundary events fire many times per second; skip all work when the active
+  // sentence hasn't actually changed.
+  if (target === state.activeSentenceEl) {
+    return;
   }
+  state.activeSentenceEl?.classList.remove("active");
+  state.activeSentenceEl = target;
+  if (!target) {
+    return;
+  }
+  target.classList.add("active");
+
+  // Scroll only when crossing into a new paragraph, so the view advances
+  // paragraph-by-paragraph instead of jittering on every word.
+  const paragraphEl = target.closest(".reader-paragraph");
+  const paragraphIndex = paragraphEl ? Number(paragraphEl.dataset.paragraphIndex) : -1;
+  if (paragraphIndex >= 0) {
+    state.currentParagraphIndex = paragraphIndex;
+  }
+  if (paragraphEl && paragraphEl !== state.activeParagraphEl) {
+    highlightParagraphAndScroll(state.currentParagraphIndex, options);
+  }
+  updateProgressDisplays();
 }
 
 async function startSpeech() {
@@ -2255,8 +2513,7 @@ function scheduleBoundaryFallback(slicedUnit, attemptNonce) {
   if (boundaries.length < 2) {
     return;
   }
-  const lang = detectSpeechLang(slicedUnit.text || "");
-  const msPerChar = (lang.startsWith("zh") ? 200 : 65) / clamp(state.rate, 0.5, 3.0);
+  const msPerChar = estimateSpeechMsPerChar(slicedUnit.text || "");
   boundaries.slice(1).forEach((boundary) => {
     const delay = Math.max(300, Math.round(boundary.start * msPerChar));
     const timer = window.setTimeout(() => {
@@ -2267,6 +2524,37 @@ function scheduleBoundaryFallback(slicedUnit, attemptNonce) {
     }, delay);
     state.boundaryFallbackTimers.push(timer);
   });
+}
+
+// Per-character speech timing used by the boundary fallback. Many voices
+// (especially Chinese ones) never fire onboundary, so the fallback timers drive
+// the read-along highlight for them; a calibrated estimate tracks the voice far
+// better than a fixed constant.
+function estimateSpeechMsPerChar(text) {
+  if (state.speechMsPerCharEwma > 0) {
+    return state.speechMsPerCharEwma;
+  }
+  const lang = detectSpeechLang(text || "");
+  return (lang.startsWith("zh") ? 200 : 65) / clamp(state.rate, 0.5, 3.0);
+}
+
+// Learn real ms-per-char from actual onstart→onend durations (EWMA). Guards
+// against outliers caused by keep-alive resumes or very short tokens.
+function recordSpeechTiming(startedAt, text) {
+  if (!startedAt) {
+    return;
+  }
+  const elapsed = Date.now() - startedAt;
+  const chars = countMeaningfulCharacters(text) || (text ? text.length : 0);
+  if (elapsed <= 0 || chars <= 0) {
+    return;
+  }
+  const msPerChar = elapsed / chars;
+  if (msPerChar < 20 || msPerChar > 1200) {
+    return;
+  }
+  state.speechMsPerCharEwma =
+    state.speechMsPerCharEwma > 0 ? state.speechMsPerCharEwma * 0.6 + msPerChar * 0.4 : msPerChar;
 }
 
 function splitPlainTextIntoSections(rawText, fallbackName) {
@@ -2878,7 +3166,11 @@ function getParagraphsFromSection(section) {
 }
 
 function getCurrentSentences() {
-  return [...dom.readerBody.querySelectorAll(".reader-sentence")].map((sentence) => sentence.textContent || "");
+  // Sentences are cached at render time (state.sentenceTexts). Reading them
+  // back from the DOM on every call was a hot-path cost during playback.
+  return state.sentenceTexts && state.sentenceTexts.length
+    ? state.sentenceTexts
+    : [...dom.readerBody.querySelectorAll(".reader-sentence")].map((sentence) => sentence.textContent || "");
 }
 
 function findNextReadableSectionIndex(startIndex) {
@@ -4544,10 +4836,12 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   const voiceSource = isBridgeVoice(selectedVoice) ? "本机 Windows 声线" : "浏览器语音";
 
   let boundaryEventSeen = false;
+  let unitStartedAt = 0;
   const onStart = () => {
     if (attemptNonce !== state.speechAttemptNonce) {
       return;
     }
+    unitStartedAt = Date.now();
     state.currentSentenceIndex = sentenceIndex;
     dom.speechStateHint.textContent = `正在朗读：${snippet}${sentences[sentenceIndex].length > 28 ? "..." : ""}`;
     highlightSentence(state.currentSentenceIndex);
@@ -4614,6 +4908,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
       nonce: attemptNonce,
       onstart: onStart,
       onend: () => {
+        if (attemptNonce === state.speechAttemptNonce) {
+          recordSpeechTiming(unitStartedAt, sanitizedSpeechText);
+        }
         if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
           return;
         }
@@ -4662,6 +4959,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   };
   utterance.onend = () => {
     releaseUtteranceRef(utterance);
+    if (attemptNonce === state.speechAttemptNonce) {
+      recordSpeechTiming(unitStartedAt, sanitizedSpeechText);
+    }
     if (attemptNonce !== state.speechAttemptNonce || !state.speaking || state.paused) {
       return;
     }
