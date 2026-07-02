@@ -5,6 +5,9 @@ import {
   listLibraryBooks,
   deleteLibraryBook,
   updateLibraryProgress,
+  getCachedOcrPage,
+  saveCachedOcrPage,
+  pruneOcrPageCache,
 } from "./library.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
@@ -124,6 +127,15 @@ const OCR_MOBILE_TARGET_LONG_EDGE = 2200;
 const OCR_MOBILE_MAX_PIXELS = 5_500_000;
 const OCR_RETRY_MIN_CHARS = 20;
 const OCR_SYMBOL_RATIO_LIMIT = 0.32;
+// Progressive PDF import: once the first pages are ready, the book is opened
+// for listening while the rest keeps parsing in the background.
+const PDF_PROGRESSIVE_MIN_PAGES = 6;
+const PDF_PROGRESSIVE_MIN_CHARS = 2000;
+const PDF_PROGRESSIVE_PUBLISH_AFTER_MS = 2500;
+const PDF_PROGRESSIVE_FORCE_PAGES = 48;
+const PDF_PROGRESSIVE_MIN_REMAINING = 8;
+const PDF_APPEND_BATCH_PAGES = 10;
+const OCR_PAGE_CACHE_MAX_AGE_MS = 45 * 24 * 60 * 60 * 1000;
 const HEADING_LINE_RE = /^(?:#{1,6}\s*.+|(?:chapter|part)\s+\d+[^\n]*|第[一二三四五六七八九十百千万0-9]+[章节卷部篇回][^\n]*|(?:序章|序言|前言|引言|后记|尾声|番外)[^\n]*)$/i;
 const REFERENCE_HEADING_RE = /^(?:参考文献|references|bibliography)$/i;
 const REFERENCE_SECTION_RE = /(?:^|\n)\s*(?:参考文献|references|bibliography)\s*(?:\n|$)[\s\S]*$/i;
@@ -225,6 +237,10 @@ const state = {
   speechAbortController: null,
   bookId: "",
   bookTransient: false,
+  // Progressive PDF import: book id being parsed in the background, and whether
+  // speech ran out of published chapters and should resume on the next append.
+  backgroundImportBookId: "",
+  awaitingMoreSections: false,
   wakeLockSentinel: null,
   keepAliveTimer: 0,
   sleepTimerId: 0,
@@ -315,6 +331,15 @@ const dom = {
   wechatStepsIos: document.getElementById("wechat-steps-ios"),
 };
 
+// Identifies the most recent book load; a background PDF import aborts as soon
+// as the user has moved on to another book (import, shelf open, demo).
+let activeImportNonce = 0;
+
+function beginBookLoad() {
+  activeImportNonce += 1;
+  return activeImportNonce;
+}
+
 bootstrap();
 
 async function bootstrap() {
@@ -349,6 +374,7 @@ async function bootstrap() {
   }
   registerFileLaunchConsumer();
   void importSharedBookIfAvailable();
+  void pruneOcrPageCache(OCR_PAGE_CACHE_MAX_AGE_MS).catch(() => {});
   window.addEventListener("beforeunload", () => {
     terminateOcrWorker();
     void terminateOcrRenderWorker();
@@ -876,14 +902,20 @@ function refreshVoiceHint() {
 }
 
 async function importBook(file) {
+  const importNonce = beginBookLoad();
   try {
     setStatus(`正在解析 ${file.name}`);
     const extension = getExtension(file.name);
-    let bookData;
 
     if (extension === "pdf") {
-      bookData = await parsePdfFile(file);
-    } else if (extension === "epub") {
+      // PDF import is progressive: it finalizes the book itself (possibly
+      // before all pages are parsed) and appends the rest in the background.
+      await importPdfBook(file, importNonce);
+      return;
+    }
+
+    let bookData;
+    if (extension === "epub") {
       bookData = await parseEpubFile(file);
     } else if (["txt", "md", "markdown"].includes(extension)) {
       bookData = await parseTextFile(file);
@@ -891,10 +923,16 @@ async function importBook(file) {
       throw new Error("暂不支持该格式，请使用 PDF / EPUB / TXT / MD。");
     }
 
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
     finalizeBook(bookData);
     setStatus(`${file.name} 已载入`);
   } catch (error) {
     console.error(error);
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
     stopSpeech({ silent: true });
     setStatus("解析失败");
     dom.readerBody.innerHTML = `
@@ -917,75 +955,328 @@ async function parseTextFile(file) {
   };
 }
 
-async function parsePdfFile(file) {
+// Progressive PDF import: publishes the first ready pages as an openable book,
+// keeps parsing/OCR in the background, and appends finished sections to the
+// live chapter list. Recognized pages are cached per file fingerprint, so an
+// interrupted import of a big scanned PDF resumes instead of redoing OCR.
+async function importPdfBook(file, importNonce) {
   const buffer = await file.arrayBuffer();
+  // Fingerprint first: pdf.js transfers the buffer into its worker below.
+  const fileKey = await computePdfFileKey(buffer, file);
   // pdf.js transfers the buffer into its own worker, so keep an independent copy
   // up front for the OCR render worker (which needs its own pdf.js document).
   // Only bother when OCR may actually run and the render worker is supported.
   const ocrRenderBuffer = supportsOcrRenderWorker() && state.ocrMode !== "off" ? buffer.slice(0) : null;
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-  const pages = [];
-  let ocrPageCount = 0;
+  const totalPages = pdf.numPages;
   state.ocrEffectiveLanguage = "";
 
+  const publisher = createPdfProgressivePublisher(file, fileKey, totalPages);
+  publisher.resumeProgress = (await getLibraryBook(publisher.bookId).catch(() => null))?.progress || null;
+  const pendingPages = [];
+  const startedAt = Date.now();
   let ocrRenderLoaded = false;
+  let ocrPageCount = 0;
+  let cachedOcrPages = 0;
+
   try {
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      setStatus(`PDF 解析中 ${pageNumber} / ${pdf.numPages}`);
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      if (importNonce !== activeImportNonce) {
+        publisher.stop();
+        return;
+      }
+      setStatus(
+        publisher.published ? `后台解析中 ${pageNumber} / ${totalPages}` : `PDF 解析中 ${pageNumber} / ${totalPages}`,
+      );
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
       let text = normalizeWhitespace(pdfTextItemsToString(content.items));
       let ocrUsed = false;
 
       if (shouldRunOcr(text)) {
-        if (!ocrRenderLoaded && ocrRenderBuffer) {
-          try {
-            ocrRenderLoaded = await loadOcrRenderDocument(ocrRenderBuffer);
-          } catch (error) {
-            console.warn("OCR render worker load failed:", error);
-            ocrRenderLoaded = false;
+        const cacheLang = state.ocrLanguage;
+        const cachedRecord = await getCachedOcrPage(fileKey, pageNumber, cacheLang).catch(() => null);
+        if (cachedRecord && typeof cachedRecord.text === "string") {
+          // Cache hit — including "" for pages recognition already found empty.
+          if (cachedRecord.text) {
+            text = repairOcrLineBreaks(cachedRecord.text);
+            maybeNarrowOcrLanguage(text);
+            ocrUsed = true;
+            ocrPageCount += 1;
+            cachedOcrPages += 1;
           }
-        }
-        const ocrText = await recognizePdfPage(page, pageNumber, pdf.numPages);
-        if (ocrText) {
-          text = repairOcrLineBreaks(ocrText);
-          ocrUsed = true;
-          ocrPageCount += 1;
+        } else {
+          if (!ocrRenderLoaded && ocrRenderBuffer) {
+            try {
+              ocrRenderLoaded = await loadOcrRenderDocument(ocrRenderBuffer);
+            } catch (error) {
+              console.warn("OCR render worker load failed:", error);
+              ocrRenderLoaded = false;
+            }
+          }
+          const ocrText = await recognizePdfPage(page, pageNumber, totalPages);
+          if (importNonce !== activeImportNonce) {
+            publisher.stop();
+            return;
+          }
+          // Only cache when the engine actually ran; a missing engine returns
+          // "" too and must not mark the page as known-empty.
+          if (window.Tesseract) {
+            void saveCachedOcrPage({ fileKey, pageNumber, lang: cacheLang, text: ocrText || "" }).catch(() => {});
+          }
+          if (ocrText) {
+            text = repairOcrLineBreaks(ocrText);
+            ocrUsed = true;
+            ocrPageCount += 1;
+          }
         }
       }
 
-      pages.push({
-        pageNumber,
-        text,
-        ocrUsed,
-      });
+      pendingPages.push({ pageNumber, text, ocrUsed });
+      publisher.maybePublish(pendingPages, { pageNumber, startedAt });
     }
+  } catch (error) {
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
+    if (!publisher.published) {
+      throw error;
+    }
+    // Part of the book is already open and readable; keep it instead of
+    // replacing the reader with a failure screen.
+    console.error("PDF 后台解析中断:", error);
+    publisher.flush(pendingPages);
+    publisher.stop();
+    setStatus(`后续页解析中断，已保留前 ${publisher.publishedPageCount} 页内容`);
+    return;
   } finally {
     // Always release the render worker's document so its memory is freed even
     // if parsing throws or the user cancels.
     void releaseOcrRenderDocument();
   }
 
-  const hasText = pages.some((page) => page.text.trim());
-  if (!hasText) {
-    if (state.ocrMode === "off") {
-      throw new Error("这份 PDF 更像扫描图片，当前已关闭扫描识别。请打开扫描识别后重试。");
-    }
-    throw new Error("扫描版 PDF 仍未识别出文字，请尝试切换到中英混合识别。");
+  if (importNonce !== activeImportNonce) {
+    publisher.stop();
+    return;
+  }
+  publisher.finish(pendingPages, { ocrPageCount, cachedOcrPages });
+}
+
+function createPdfProgressivePublisher(file, fileKey, totalPages) {
+  const bookId = `book-pdf-${fileKey}`;
+  const baseTitle = stripFileExtension(file.name);
+  const progressSubtitle = (pageNumber) => `PDF 共 ${totalPages} 页 · 前 ${pageNumber} 页已就绪，后续章节解析中…`;
+
+  return {
+    bookId,
+    published: false,
+    publishedPageCount: 0,
+    resumeProgress: null,
+
+    maybePublish(pendingPages, { pageNumber, startedAt }) {
+      if (!this.published) {
+        const remaining = totalPages - pageNumber;
+        if (
+          pageNumber < PDF_PROGRESSIVE_MIN_PAGES ||
+          remaining < PDF_PROGRESSIVE_MIN_REMAINING ||
+          pendingPages.reduce((sum, page) => sum + page.text.length, 0) < PDF_PROGRESSIVE_MIN_CHARS
+        ) {
+          return;
+        }
+        const slowEnough =
+          Date.now() - startedAt >= PDF_PROGRESSIVE_PUBLISH_AFTER_MS || totalPages >= PDF_PROGRESSIVE_FORCE_PAGES;
+        if (!slowEnough) {
+          return;
+        }
+        if (this.publishFirst(pendingPages.slice(), pageNumber)) {
+          this.published = true;
+          this.publishedPageCount = pageNumber;
+          state.backgroundImportBookId = bookId;
+          pendingPages.length = 0;
+        }
+        return;
+      }
+      if (pendingPages.length >= PDF_APPEND_BATCH_PAGES) {
+        this.appendBatch(pendingPages.splice(0));
+      }
+    },
+
+    publishFirst(pages, pageNumber) {
+      const sections = splitPdfPagesIntoSections(pages, file.name);
+      if (!sections.length) {
+        return false;
+      }
+      try {
+        finalizeBook(
+          {
+            title: baseTitle,
+            subtitle: progressSubtitle(pageNumber),
+            format: "PDF",
+            sections,
+            sourceHint: "边解析边听：后台完成的章节会自动追加到目录。",
+          },
+          { bookId, progress: this.resumeProgress },
+        );
+      } catch {
+        // Normalization can reject boilerplate-only opening pages — keep
+        // collecting and try again with more pages.
+        return false;
+      }
+      setStatus(`前 ${pageNumber} 页已就绪，可以开始收听`);
+      return true;
+    },
+
+    appendBatch(pages) {
+      if (!pages.length || !state.book || state.bookId !== bookId) {
+        return;
+      }
+      const lastPageNumber = pages[pages.length - 1]?.pageNumber || this.publishedPageCount;
+      appendSectionsToBook(splitPdfPagesIntoSections(pages, file.name));
+      this.publishedPageCount = lastPageNumber;
+      if (state.book && state.bookId === bookId) {
+        state.book.subtitle = progressSubtitle(lastPageNumber);
+        dom.bookSubtitle.textContent = state.book.subtitle;
+      }
+    },
+
+    flush(pendingPages) {
+      this.appendBatch(pendingPages.splice(0));
+    },
+
+    stop() {
+      if (state.backgroundImportBookId === bookId) {
+        state.backgroundImportBookId = "";
+      }
+    },
+
+    finish(pendingPages, { ocrPageCount, cachedOcrPages }) {
+      const subtitle = ocrPageCount
+        ? `PDF 共 ${totalPages} 页，其中 ${ocrPageCount} 页通过扫描识别补出正文${
+            cachedOcrPages ? `（${cachedOcrPages} 页沿用上次识别缓存）` : ""
+          }。`
+        : `PDF 共 ${totalPages} 页，已转换为可朗读章节。`;
+      const sourceHint = ocrPageCount
+        ? "已自动识别扫描页；如果需要中文扫描识别，可切到中英混合模式。"
+        : "优先识别章标题；识别不到时自动按页数和文本长度回退分段。";
+
+      if (!this.published) {
+        const pages = pendingPages.splice(0);
+        if (!pages.some((page) => page.text.trim())) {
+          if (state.ocrMode === "off") {
+            throw new Error("这份 PDF 更像扫描图片，当前已关闭扫描识别。请打开扫描识别后重试。");
+          }
+          throw new Error("扫描版 PDF 仍未识别出文字，请尝试切换到中英混合识别。");
+        }
+        finalizeBook(
+          {
+            title: baseTitle,
+            subtitle,
+            format: "PDF",
+            sections: splitPdfPagesIntoSections(pages, file.name),
+            sourceHint,
+          },
+          { bookId, progress: this.resumeProgress },
+        );
+        setStatus(`${file.name} 已载入`);
+        return;
+      }
+
+      this.flush(pendingPages);
+      this.stop();
+      if (state.book && state.bookId === bookId) {
+        state.book.subtitle = subtitle;
+        state.book.sourceHint = sourceHint;
+        dom.bookSubtitle.textContent = subtitle;
+        if (!state.bookTransient) {
+          void persistBookToLibrary();
+        }
+        setStatus(`${file.name} 已全部解析完成`);
+        maybeResumeSpeechAfterAppend();
+      }
+    },
+  };
+}
+
+// Appends newly parsed sections to the live book. Sections are only ever added
+// past the end, so the current reading position and highlights stay untouched.
+function appendSectionsToBook(rawSections) {
+  if (!state.book || !rawSections?.length) {
+    return;
+  }
+  const offset = state.book.sections.length;
+  const prepared = rawSections
+    .map((section, index) => ({
+      id: `section-${offset + index + 1}`,
+      title: cleanHeading(section.title || `章节 ${offset + index + 1}`),
+      text: cleanDisplayText(section.text || ""),
+      sourceHint: section.sourceHint || "",
+    }))
+    .filter((section) => section.text.trim());
+  if (!prepared.length) {
+    return;
   }
 
-  const sections = splitPdfPagesIntoSections(pages, file.name);
-  return {
-    title: stripFileExtension(file.name),
-    subtitle: ocrPageCount
-      ? `PDF 共 ${pdf.numPages} 页，其中 ${ocrPageCount} 页通过扫描识别补出正文。`
-      : `PDF 共 ${pdf.numPages} 页，已转换为可朗读章节。`,
-    format: "PDF",
-    sections,
-    sourceHint: ocrPageCount
-      ? "已自动识别扫描页；如果需要中文扫描识别，可切到中英混合模式。"
-      : "优先识别章标题；识别不到时自动按页数和文本长度回退分段。",
-  };
+  const appended = normalizeBookSections(prepared, {
+    format: state.book.format,
+    fallbackTitle: cleanHeading(state.book.title || "正文"),
+  }).map((section, index) => ({ ...section, id: `section-${offset + index + 1}` }));
+  if (!appended.length) {
+    return;
+  }
+
+  state.book.sections.push(...appended);
+  state.book.totalCharacters += appended.reduce((sum, section) => sum + section.text.length, 0);
+  state.book.totalParagraphs += appended.reduce((sum, section) => sum + getSectionParagraphCount(section), 0);
+
+  refreshBookUiAfterAppend();
+  if (!state.bookTransient) {
+    void persistBookToLibrary();
+  }
+  maybeResumeSpeechAfterAppend();
+}
+
+function refreshBookUiAfterAppend() {
+  const sectionCount = state.book.sections.length;
+  dom.chapterCount.textContent = String(sectionCount);
+  dom.charCount.textContent = formatCount(state.book.totalCharacters);
+  dom.chapterSelectLabel.textContent = `共 ${sectionCount} 章 · ${state.book.totalParagraphs || 0} 段`;
+  renderChapterChips();
+  dom.chapterSelect.value = String(state.currentSectionIndex);
+  dom.currentChapterMetric.textContent = `${state.currentSectionIndex + 1}/${sectionCount}`;
+  dom.readerPositionPill.textContent = `${state.currentSectionIndex + 1} / ${sectionCount}`;
+  updateProgressDisplays();
+}
+
+// When listening outran the background parser (speech hit the end of the last
+// available chapter), continue automatically once new chapters arrive.
+function maybeResumeSpeechAfterAppend() {
+  if (!state.awaitingMoreSections || state.speaking) {
+    return;
+  }
+  const nextSectionIndex = findNextReadableSectionIndex(state.currentSectionIndex + 1);
+  if (nextSectionIndex < 0) {
+    return;
+  }
+  state.awaitingMoreSections = false;
+  setCurrentSection(nextSectionIndex, { resetParagraph: true, resetSentence: true });
+  void startSpeech();
+}
+
+async function computePdfFileKey(buffer, file) {
+  try {
+    if (crypto?.subtle?.digest) {
+      const digest = await crypto.subtle.digest("SHA-256", buffer);
+      return [...new Uint8Array(digest).slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // Fall through to the metadata fingerprint (e.g. non-secure contexts).
+  }
+  const seed = `${file.name}::${file.size}::${file.lastModified || 0}`;
+  let hash = 5381;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = ((hash << 5) + hash + seed.charCodeAt(index)) >>> 0;
+  }
+  return `meta-${hash.toString(36)}-${file.size}`;
 }
 
 async function parseEpubFile(file) {
@@ -1739,6 +2030,7 @@ async function openLibraryBook(bookId, options = {}) {
     if (!record || !Array.isArray(record.sections) || !record.sections.length) {
       return false;
     }
+    beginBookLoad();
     finalizeBook(
       {
         title: record.title,
@@ -4732,6 +5024,7 @@ runVoiceSelfTest = async function () {
 startSpeech = async function () {
   window.clearTimeout(state.speechRestartTimer);
   window.clearTimeout(state.rateRestartTimer);
+  state.awaitingMoreSections = false;
   if (!state.book) {
     setStatus("请先导入书籍");
     renderSpeechDiagnostics("还没有书", "请先导入一本书，再开始听读。", "warning");
@@ -4808,8 +5101,15 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
 
     state.speaking = false;
     state.paused = false;
-    dom.speechStateHint.textContent = "全书朗读结束";
-    renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
+    if (state.backgroundImportBookId && state.backgroundImportBookId === state.bookId) {
+      // Listening outran the background parser; resume when chapters append.
+      state.awaitingMoreSections = true;
+      dom.speechStateHint.textContent = "已读到最新解析进度，后续章节解析完会自动续读";
+      renderSpeechDiagnostics("等待后续章节", "已读完当前解析出的内容；后台解析出新章节后会自动继续朗读。", "success");
+    } else {
+      dom.speechStateHint.textContent = "全书朗读结束";
+      renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
+    }
     updateSpeechProgress();
     onSpeechPlaybackStopped();
     return false;
@@ -5020,6 +5320,7 @@ togglePause = async function () {
 
 stopSpeech = function (options = {}) {
   state.speechAttemptNonce += 1;
+  state.awaitingMoreSections = false;
   state.utteranceRefs = [];
   window.clearTimeout(state.rateRestartTimer);
   window.clearTimeout(state.speechRestartTimer);
@@ -5061,6 +5362,7 @@ refreshVoiceHint = function () {
 };
 
 function loadDemoBook(options = {}) {
+  beginBookLoad();
   const demoSections = splitPlainTextIntoSections(demoBookText, "aurora-demo.txt");
   finalizeBook({
     title: "Aurora Demo",
