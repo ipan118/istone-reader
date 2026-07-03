@@ -243,6 +243,7 @@ const state = {
   awaitingMoreSections: false,
   wakeLockSentinel: null,
   keepAliveTimer: 0,
+  mediaAnchorAudio: null,
   sleepTimerId: 0,
   sleepTimerEndsAt: 0,
   boundaryFallbackTimers: [],
@@ -2655,9 +2656,97 @@ function stopSpeechKeepAlive() {
   state.keepAliveTimer = 0;
 }
 
+// --- Lock-screen media anchor ---
+// speechSynthesis output is not a real media stream, so mobile browsers often
+// refuse to attach lock-screen / notification media controls to it and may
+// suspend the tab's audio session in the background. A looping, practically
+// inaudible <audio> element keeps a genuine audio session alive while reading,
+// which anchors the Media Session (metadata, play/pause/next controls) to the
+// page. The bridge-voice path plays real audio already, but running the anchor
+// alongside it is harmless and avoids per-sentence flapping.
+
+let mediaAnchorUrl = "";
+
+// 4 s of 37 Hz sine at amplitude 96/32767 (≈ −51 dBFS): phone speakers cannot
+// reproduce it, but it is not digital silence, so the browser still treats the
+// element as an audible media session.
+function buildMediaAnchorWavBlob() {
+  const sampleRate = 8000;
+  const sampleCount = sampleRate * 4;
+  const buffer = new ArrayBuffer(44 + sampleCount * 2);
+  const view = new DataView(buffer);
+  const writeAscii = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, sampleCount * 2, true);
+  for (let index = 0; index < sampleCount; index += 1) {
+    view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 37 * index) / sampleRate) * 96), true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function getMediaAnchorAudio() {
+  if (state.mediaAnchorAudio) {
+    return state.mediaAnchorAudio;
+  }
+  try {
+    if (!mediaAnchorUrl) {
+      mediaAnchorUrl = URL.createObjectURL(buildMediaAnchorWavBlob());
+    }
+    const audio = new Audio(mediaAnchorUrl);
+    audio.id = "media-anchor-audio";
+    audio.loop = true;
+    audio.volume = 0.05;
+    audio.preload = "auto";
+    audio.setAttribute("playsinline", "");
+    audio.hidden = true;
+    document.body.appendChild(audio);
+    state.mediaAnchorAudio = audio;
+  } catch {
+    state.mediaAnchorAudio = null;
+  }
+  return state.mediaAnchorAudio;
+}
+
+function startMediaAnchor() {
+  const audio = getMediaAnchorAudio();
+  if (!audio) {
+    return;
+  }
+  const playPromise = audio.play();
+  if (playPromise && typeof playPromise.catch === "function") {
+    // Autoplay policies can reject a play() outside a user gesture; the anchor
+    // is an enhancement, so reading simply continues without it.
+    playPromise.catch(() => {});
+  }
+}
+
+function stopMediaAnchor() {
+  try {
+    state.mediaAnchorAudio?.pause();
+  } catch {
+    // Ignore pause failures.
+  }
+}
+
 function onSpeechPlaybackStarted() {
   void acquireWakeLock();
   startSpeechKeepAlive();
+  startMediaAnchor();
   updateMediaSessionMetadata();
   setMediaSessionPlaybackState("playing");
 }
@@ -2666,6 +2755,7 @@ function onSpeechPlaybackStopped(options = {}) {
   releaseWakeLock();
   stopSpeechKeepAlive();
   clearBoundaryFallbackTimers();
+  stopMediaAnchor();
   setMediaSessionPlaybackState(options.paused ? "paused" : "none");
   void persistProgressNow();
 }
@@ -5038,6 +5128,10 @@ startSpeech = async function () {
     return;
   }
 
+  // Unlock the media anchor while still inside the user gesture — waiting for
+  // voices below can outlast the gesture window on iOS/Android autoplay rules.
+  startMediaAnchor();
+
   if (state.paused && state.activeAudio) {
     await state.activeAudio.play();
     state.paused = false;
@@ -5194,6 +5288,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     state.speaking = false;
     state.paused = false;
     dom.speechStateHint.textContent = "语音朗读中断，请重新开始";
+    // Release the wake lock, keep-alive timer and media anchor — this is a
+    // terminal stop, not a retry.
+    onSpeechPlaybackStopped();
     const details = describeSpeechError(event?.error || event?.type || "");
     renderSpeechDiagnostics("朗读失败", `${details.title}。${details.message}`, details.state || "error");
   };
