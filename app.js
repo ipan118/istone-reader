@@ -964,10 +964,10 @@ async function importPdfBook(file, importNonce) {
   const buffer = await file.arrayBuffer();
   // Fingerprint first: pdf.js transfers the buffer into its worker below.
   const fileKey = await computePdfFileKey(buffer, file);
-  // pdf.js transfers the buffer into its own worker, so keep an independent copy
-  // up front for the OCR render worker (which needs its own pdf.js document).
-  // Only bother when OCR may actually run and the render worker is supported.
-  const ocrRenderBuffer = supportsOcrRenderWorker() && state.ocrMode !== "off" ? buffer.slice(0) : null;
+  // The OCR render worker needs its own pdf.js document. It receives the File
+  // handle (disk-backed, cloned for free) and reads the bytes itself, so the
+  // main thread never holds a second copy of a potentially huge scanned PDF.
+  const canUseOcrRenderWorker = supportsOcrRenderWorker() && state.ocrMode !== "off";
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
   const totalPages = pdf.numPages;
   state.ocrEffectiveLanguage = "";
@@ -1007,9 +1007,9 @@ async function importPdfBook(file, importNonce) {
             cachedOcrPages += 1;
           }
         } else {
-          if (!ocrRenderLoaded && ocrRenderBuffer) {
+          if (!ocrRenderLoaded && canUseOcrRenderWorker) {
             try {
-              ocrRenderLoaded = await loadOcrRenderDocument(ocrRenderBuffer);
+              ocrRenderLoaded = await loadOcrRenderDocument(file);
             } catch (error) {
               console.warn("OCR render worker load failed:", error);
               ocrRenderLoaded = false;
@@ -1547,7 +1547,10 @@ function sendOcrRenderMessage(payload, transfer = []) {
   });
 }
 
-async function loadOcrRenderDocument(buffer) {
+// Loads the document into the render worker from the original File handle.
+// Structured-cloning a File is practically free (it is disk-backed); the bytes
+// are read inside the worker, keeping the main thread free of a second copy.
+async function loadOcrRenderDocument(file) {
   const worker = ensureOcrRenderWorker();
   if (!worker) {
     return false;
@@ -1555,7 +1558,7 @@ async function loadOcrRenderDocument(buffer) {
   if (state.ocrRenderLoaded) {
     return true;
   }
-  await sendOcrRenderMessage({ type: "load", buffer }, [buffer]);
+  await sendOcrRenderMessage({ type: "load", file });
   state.ocrRenderLoaded = true;
   return true;
 }
@@ -2187,7 +2190,10 @@ function setCurrentSection(index, options = {}) {
   updateProgressDisplays();
   updateSpeechProgress();
   updateMediaSessionMetadata();
-  schedulePersistProgress();
+  // Chapter switches are infrequent and losing one to the debounce window is
+  // very visible (reload restores the wrong chapter), so persist immediately;
+  // high-frequency sentence progress keeps using the debounced path.
+  void persistProgressNow();
 }
 
 function renderCurrentSection() {
