@@ -376,6 +376,11 @@ async function bootstrap() {
   registerFileLaunchConsumer();
   void importSharedBookIfAvailable();
   void pruneOcrPageCache(OCR_PAGE_CACHE_MAX_AGE_MS).catch(() => {});
+  // Ask the browser to protect the shelf (books + OCR cache) from automatic
+  // storage eviction; best-effort, some browsers grant silently by heuristics.
+  if (navigator.storage?.persist) {
+    void navigator.storage.persist().catch(() => {});
+  }
   window.addEventListener("beforeunload", () => {
     terminateOcrWorker();
     void terminateOcrRenderWorker();
