@@ -1,4 +1,4 @@
-const CACHE_NAME = "istone-reader-pwa-v25";
+const CACHE_NAME = "istone-reader-pwa-v26";
 const SHARED_BOOK_URL = new URL("./shared-book", self.registration.scope).toString();
 const SHARE_TARGET_PATH = new URL("./share-target", self.registration.scope).pathname;
 const API_PATH_PREFIX = new URL("./api/", self.registration.scope).pathname;
@@ -8,6 +8,7 @@ const CORE_ASSETS = [
   "./styles.css",
   "./app.js",
   "./library.js",
+  "./text-pipeline.mjs",
   "./ocr-render-worker.js",
   "./manifest.webmanifest",
   "./assets/icon.svg",
@@ -34,7 +35,7 @@ const OCR_PACK_ASSETS = [
 // the registration scope so the list keeps working when the app is hosted
 // under a sub-path (e.g. GitHub Pages project sites).
 const LIVE_ASSET_URLS = new Set(
-  ["./", "./index.html", "./app.js", "./library.js", "./ocr-render-worker.js", "./styles.css", "./manifest.webmanifest", "./sw.js"].map(
+  ["./", "./index.html", "./app.js", "./library.js", "./text-pipeline.mjs", "./ocr-render-worker.js", "./styles.css", "./manifest.webmanifest", "./sw.js"].map(
     (path) => new URL(path, self.registration.scope).toString(),
   ),
 );

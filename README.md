@@ -44,6 +44,12 @@ http://127.0.0.1:4173/
 
 ## 本地验证
 
+文本管线（分章、分句、OCR 修复、引用剥离等）的回归测试无需浏览器：
+
+```bash
+node --test tests/text-pipeline.test.mjs
+```
+
 冒烟测试基于 Playwright（使用其自带 Chromium）：
 
 ```bash
@@ -57,7 +63,9 @@ node smoke-test.cjs
 
 ## 目录说明
 
-- `app.js` 应用主逻辑（解析、分章、朗读、OCR、UI）
+- `app.js` 应用主逻辑（解析调度、朗读、OCR、UI）
+- `text-pipeline.mjs` 文本管线（分章、分句、段落重排、OCR 文本修复、引用剥离、章节规整；纯函数，浏览器与 Node 通用）
+- `tests/` 文本管线回归测试（`node --test`）
 - `library.js` 本机书架与进度持久化（IndexedDB）
 - `sw.js` Service Worker（离线缓存与分享导入）
 - `vendor/` 本地依赖：pdf.js、epub.js、jszip、Tesseract（含 `tessdata/` 中英文识别模型）
