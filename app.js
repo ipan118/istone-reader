@@ -5,7 +5,35 @@ import {
   listLibraryBooks,
   deleteLibraryBook,
   updateLibraryProgress,
+  getCachedOcrPage,
+  saveCachedOcrPage,
+  pruneOcrPageCache,
 } from "./library.js";
+import {
+  splitPlainTextIntoSections,
+  splitPdfPagesIntoSections,
+  repairOcrLineBreaks,
+  fallbackChunkSections,
+  pdfTextItemsToString,
+  splitIntoParagraphs,
+  splitIntoSentences,
+  cleanDisplayText,
+  sanitizeTextForSpeech,
+  hasStrongSentenceEnding,
+  joinSentences,
+  shouldInsertSpaceBetween,
+  appendSectionText,
+  cleanHeading,
+  normalizeLineBreaks,
+  normalizeWhitespace,
+  normalizeSectionKey,
+  stripLeadingHeadingFromText,
+  normalizeBookSections,
+  getSectionParagraphCount,
+  countMeaningfulCharacters,
+  stripFileExtension,
+  detectSpeechLang,
+} from "./text-pipeline.mjs";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
@@ -112,8 +140,6 @@ const demoBookText = `# 序章 星光图书馆
 
 当书被导入、章节被切开、声音开始播放，整个过程像把沉重资料变成可随身携带的阅读旅程。`;
 
-const CHAPTER_HEADING_RE =
-  /^(#{1,6}\s*.+|(?:chapter|part)\s+\d+[^\n]*|第[一二三四五六七八九十百千万0-9]+[章节卷部篇回][^\n]*|(?:序章|序言|前言|引言|后记|尾声|番外)[^\n]*)$/gim;
 const QUICK_POINT_COUNT = 5;
 const OCR_MIN_MEANINGFUL_CHARS = 36;
 const OCR_RENDER_MIN_SCALE = 1.8;
@@ -124,9 +150,15 @@ const OCR_MOBILE_TARGET_LONG_EDGE = 2200;
 const OCR_MOBILE_MAX_PIXELS = 5_500_000;
 const OCR_RETRY_MIN_CHARS = 20;
 const OCR_SYMBOL_RATIO_LIMIT = 0.32;
-const HEADING_LINE_RE = /^(?:#{1,6}\s*.+|(?:chapter|part)\s+\d+[^\n]*|第[一二三四五六七八九十百千万0-9]+[章节卷部篇回][^\n]*|(?:序章|序言|前言|引言|后记|尾声|番外)[^\n]*)$/i;
-const REFERENCE_HEADING_RE = /^(?:参考文献|references|bibliography)$/i;
-const REFERENCE_SECTION_RE = /(?:^|\n)\s*(?:参考文献|references|bibliography)\s*(?:\n|$)[\s\S]*$/i;
+// Progressive PDF import: once the first pages are ready, the book is opened
+// for listening while the rest keeps parsing in the background.
+const PDF_PROGRESSIVE_MIN_PAGES = 6;
+const PDF_PROGRESSIVE_MIN_CHARS = 2000;
+const PDF_PROGRESSIVE_PUBLISH_AFTER_MS = 2500;
+const PDF_PROGRESSIVE_FORCE_PAGES = 48;
+const PDF_PROGRESSIVE_MIN_REMAINING = 8;
+const PDF_APPEND_BATCH_PAGES = 10;
+const OCR_PAGE_CACHE_MAX_AGE_MS = 45 * 24 * 60 * 60 * 1000;
 const PRIORITY_VOICE_BUCKETS = ["zh-cn", "en-us", "en-gb", "en-global", "zh-tw", "ja-jp", "ko-kr", "fr-fr", "de-de", "es-es", "it-it"];
 const CORE_VOICE_LIMITS = new Map([
   ["zh-cn", 3],
@@ -136,37 +168,7 @@ const CORE_VOICE_LIMITS = new Map([
   ["zh-tw", 2],
 ]);
 const PREFERRED_ZH_CN_VOICE_NAMES = ["xiaoxiao", "yunxi", "huihui", "xiaoyi", "xiaomeng", "xiaohan", "yunjian", "yunyang"];
-const SENTENCE_END_RE = /[。！？!?\.]["”’')\]]*$/;
-const SPEECH_FILTER_RE = /[—–―]+|\.{3,}|…+|[()（）\[\]【】{}<>《》「」『』]/g;
-const BRACKET_REFERENCE_RE = /(?:\[(?:\d{1,3}(?:\s*[-,–]\s*\d{1,3})*)\]|\((?:\d{1,3}(?:\s*[-,–]\s*\d{1,3})*)\)|（(?:\d{1,3}(?:\s*[-,–]\s*\d{1,3})*)）|【(?:\d{1,3}(?:\s*[-,–]\s*\d{1,3})*)】)/g;
-const SIMPLE_PAREN_REFERENCE_RE = /[（(【\[]\s*[¹²³⁴⁵⁶⁷⁸⁹⁰\d]{1,3}(?:\s*[-,–—]\s*[¹²³⁴⁵⁶⁷⁸⁹⁰\d]{1,3})*\s*[）)】\]]/g;
-const LEADING_REFERENCE_RE = /(^|\n)\s*(?:\d{1,2}|[\[(（【]\d{1,3}[\])）】])(?=(?:\s|["“‘'（(【\[\u4e00-\u9fa5A-Za-z]))/g;
-const INLINE_CJK_REFERENCE_RE = /(?<=[\u4e00-\u9fa5])\d{1,2}(?=(?:[，。；：、）》」』】\])]|$))/g;
-const INLINE_END_REFERENCE_RE = /(?<=[\u4e00-\u9fa5）】〉》」』])[¹²³⁴⁵⁶⁷⁸⁹⁰\d]{1,3}(?=(?:[，。；：、,.!?！？;:）】〉》」』"'”’\s]|$))/g;
-const SUPERSCRIPT_REFERENCE_RE = /[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g;
-const LONE_NUMBER_LINE_RE = /^\s*\d{1,3}\s*$/gm;
-const INLINE_SYMBOL_RE = /[#*_~^`|]/g;
-const MIN_PARAGRAPH_CHARS = 56;
-const IDEAL_PARAGRAPH_CHARS = 148;
-const MAX_PARAGRAPH_CHARS = 250;
-const WRAPPED_BLOCK_AVERAGE_LINE = 52;
-const WRAPPED_BLOCK_SHORT_LINE = 48;
-const OCR_SHORT_FRAGMENT_CHARS = 34;
-const NON_BREAKING_ABBR_RE =
-  /\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|Mt|No|Nos|Fig|Figs|Eq|Eqs|Dept|Univ|Inc|Ltd|Co|Corp|vs|etc|MD|PhD)\.$/i;
-const INITIALISM_END_RE = /(?:\b[A-Z]\.){1,5}$/;
-const OCR_NOISE_LINE_RE =
-  /^(?:[-_~*•·|｜\s]+|\d{1,4}|page\s*\d{1,4}|第\s*\d{1,4}\s*页|[A-Z]?\d{1,3}[A-Z]?|[A-Z]{1,2})$/i;
-const SHORT_SECTION_MERGE_CHARS = 360;
-const AGGRESSIVE_SECTION_MERGE_CHARS = 820;
-const KEEP_SECTION_TARGET_CHARS = 2200;
 const MIN_EPUB_TOC_SPLIT_CHARS = 780;
-const SECTION_PREVIEW_CHARS = 30;
-const BOILERPLATE_TITLE_RE = /^(?:版权(?:信息|页)?|版权所有|侵权必究|目录|contents?|catalog|出版信息|联系(?:方式|我们)?|about|封面|扉页)$/i;
-const BOILERPLATE_LINE_RE = /(?:版权所有|侵权必究|出版社|出版|发行|电子版|客服(?:热线|电话|邮箱)?|热线|邮箱|网址|官网|官方|微信(?:公众号|号)?|微博|ISBN|CIP|service@|https?:\/\/|www\.|责任编辑|装帧|定价|印刷|联系电话|copyright)/i;
-const TOC_LINE_RE = /(?:^\s*(?:第[一二三四五六七八九十百千万0-9]+[章节卷部篇回]|chapter|part|contents?)\b)|(?:\.{2,}\s*\d+\s*$)|(?:\s+\d+\s*$)/i;
-const PAGE_ARTIFACT_RE = /^(?:page\s*)?\d{1,4}$/i;
-const GENERIC_SECTION_TITLE_RE = /^(?:section|chapter|part|正文|内容|片段|分段|章节|第\s*\d+\s*[章节卷部篇回]?|pdf\s*分段)\b/i;
 const SPEECH_UNIT_IDEAL_CHARS = 240;
 const SPEECH_UNIT_MAX_CHARS = 360;
 const SPEECH_UNIT_LANG_STICKY_CHARS = 20;
@@ -225,8 +227,13 @@ const state = {
   speechAbortController: null,
   bookId: "",
   bookTransient: false,
+  // Progressive PDF import: book id being parsed in the background, and whether
+  // speech ran out of published chapters and should resume on the next append.
+  backgroundImportBookId: "",
+  awaitingMoreSections: false,
   wakeLockSentinel: null,
   keepAliveTimer: 0,
+  mediaAnchorAudio: null,
   sleepTimerId: 0,
   sleepTimerEndsAt: 0,
   boundaryFallbackTimers: [],
@@ -315,6 +322,15 @@ const dom = {
   wechatStepsIos: document.getElementById("wechat-steps-ios"),
 };
 
+// Identifies the most recent book load; a background PDF import aborts as soon
+// as the user has moved on to another book (import, shelf open, demo).
+let activeImportNonce = 0;
+
+function beginBookLoad() {
+  activeImportNonce += 1;
+  return activeImportNonce;
+}
+
 bootstrap();
 
 async function bootstrap() {
@@ -349,6 +365,12 @@ async function bootstrap() {
   }
   registerFileLaunchConsumer();
   void importSharedBookIfAvailable();
+  void pruneOcrPageCache(OCR_PAGE_CACHE_MAX_AGE_MS).catch(() => {});
+  // Ask the browser to protect the shelf (books + OCR cache) from automatic
+  // storage eviction; best-effort, some browsers grant silently by heuristics.
+  if (navigator.storage?.persist) {
+    void navigator.storage.persist().catch(() => {});
+  }
   window.addEventListener("beforeunload", () => {
     terminateOcrWorker();
     void terminateOcrRenderWorker();
@@ -876,14 +898,20 @@ function refreshVoiceHint() {
 }
 
 async function importBook(file) {
+  const importNonce = beginBookLoad();
   try {
     setStatus(`正在解析 ${file.name}`);
     const extension = getExtension(file.name);
-    let bookData;
 
     if (extension === "pdf") {
-      bookData = await parsePdfFile(file);
-    } else if (extension === "epub") {
+      // PDF import is progressive: it finalizes the book itself (possibly
+      // before all pages are parsed) and appends the rest in the background.
+      await importPdfBook(file, importNonce);
+      return;
+    }
+
+    let bookData;
+    if (extension === "epub") {
       bookData = await parseEpubFile(file);
     } else if (["txt", "md", "markdown"].includes(extension)) {
       bookData = await parseTextFile(file);
@@ -891,10 +919,16 @@ async function importBook(file) {
       throw new Error("暂不支持该格式，请使用 PDF / EPUB / TXT / MD。");
     }
 
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
     finalizeBook(bookData);
     setStatus(`${file.name} 已载入`);
   } catch (error) {
     console.error(error);
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
     stopSpeech({ silent: true });
     setStatus("解析失败");
     dom.readerBody.innerHTML = `
@@ -917,75 +951,328 @@ async function parseTextFile(file) {
   };
 }
 
-async function parsePdfFile(file) {
+// Progressive PDF import: publishes the first ready pages as an openable book,
+// keeps parsing/OCR in the background, and appends finished sections to the
+// live chapter list. Recognized pages are cached per file fingerprint, so an
+// interrupted import of a big scanned PDF resumes instead of redoing OCR.
+async function importPdfBook(file, importNonce) {
   const buffer = await file.arrayBuffer();
-  // pdf.js transfers the buffer into its own worker, so keep an independent copy
-  // up front for the OCR render worker (which needs its own pdf.js document).
-  // Only bother when OCR may actually run and the render worker is supported.
-  const ocrRenderBuffer = supportsOcrRenderWorker() && state.ocrMode !== "off" ? buffer.slice(0) : null;
+  // Fingerprint first: pdf.js transfers the buffer into its worker below.
+  const fileKey = await computePdfFileKey(buffer, file);
+  // The OCR render worker needs its own pdf.js document. It receives the File
+  // handle (disk-backed, cloned for free) and reads the bytes itself, so the
+  // main thread never holds a second copy of a potentially huge scanned PDF.
+  const canUseOcrRenderWorker = supportsOcrRenderWorker() && state.ocrMode !== "off";
   const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
-  const pages = [];
-  let ocrPageCount = 0;
+  const totalPages = pdf.numPages;
   state.ocrEffectiveLanguage = "";
 
+  const publisher = createPdfProgressivePublisher(file, fileKey, totalPages);
+  publisher.resumeProgress = (await getLibraryBook(publisher.bookId).catch(() => null))?.progress || null;
+  const pendingPages = [];
+  const startedAt = Date.now();
   let ocrRenderLoaded = false;
+  let ocrPageCount = 0;
+  let cachedOcrPages = 0;
+
   try {
-    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      setStatus(`PDF 解析中 ${pageNumber} / ${pdf.numPages}`);
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      if (importNonce !== activeImportNonce) {
+        publisher.stop();
+        return;
+      }
+      setStatus(
+        publisher.published ? `后台解析中 ${pageNumber} / ${totalPages}` : `PDF 解析中 ${pageNumber} / ${totalPages}`,
+      );
       const page = await pdf.getPage(pageNumber);
       const content = await page.getTextContent();
       let text = normalizeWhitespace(pdfTextItemsToString(content.items));
       let ocrUsed = false;
 
       if (shouldRunOcr(text)) {
-        if (!ocrRenderLoaded && ocrRenderBuffer) {
-          try {
-            ocrRenderLoaded = await loadOcrRenderDocument(ocrRenderBuffer);
-          } catch (error) {
-            console.warn("OCR render worker load failed:", error);
-            ocrRenderLoaded = false;
+        const cacheLang = state.ocrLanguage;
+        const cachedRecord = await getCachedOcrPage(fileKey, pageNumber, cacheLang).catch(() => null);
+        if (cachedRecord && typeof cachedRecord.text === "string") {
+          // Cache hit — including "" for pages recognition already found empty.
+          if (cachedRecord.text) {
+            text = repairOcrLineBreaks(cachedRecord.text);
+            maybeNarrowOcrLanguage(text);
+            ocrUsed = true;
+            ocrPageCount += 1;
+            cachedOcrPages += 1;
           }
-        }
-        const ocrText = await recognizePdfPage(page, pageNumber, pdf.numPages);
-        if (ocrText) {
-          text = repairOcrLineBreaks(ocrText);
-          ocrUsed = true;
-          ocrPageCount += 1;
+        } else {
+          if (!ocrRenderLoaded && canUseOcrRenderWorker) {
+            try {
+              ocrRenderLoaded = await loadOcrRenderDocument(file);
+            } catch (error) {
+              console.warn("OCR render worker load failed:", error);
+              ocrRenderLoaded = false;
+            }
+          }
+          const ocrText = await recognizePdfPage(page, pageNumber, totalPages);
+          if (importNonce !== activeImportNonce) {
+            publisher.stop();
+            return;
+          }
+          // Only cache when the engine actually ran; a missing engine returns
+          // "" too and must not mark the page as known-empty.
+          if (window.Tesseract) {
+            void saveCachedOcrPage({ fileKey, pageNumber, lang: cacheLang, text: ocrText || "" }).catch(() => {});
+          }
+          if (ocrText) {
+            text = repairOcrLineBreaks(ocrText);
+            ocrUsed = true;
+            ocrPageCount += 1;
+          }
         }
       }
 
-      pages.push({
-        pageNumber,
-        text,
-        ocrUsed,
-      });
+      pendingPages.push({ pageNumber, text, ocrUsed });
+      publisher.maybePublish(pendingPages, { pageNumber, startedAt });
     }
+  } catch (error) {
+    if (importNonce !== activeImportNonce) {
+      return;
+    }
+    if (!publisher.published) {
+      throw error;
+    }
+    // Part of the book is already open and readable; keep it instead of
+    // replacing the reader with a failure screen.
+    console.error("PDF 后台解析中断:", error);
+    publisher.flush(pendingPages);
+    publisher.stop();
+    setStatus(`后续页解析中断，已保留前 ${publisher.publishedPageCount} 页内容`);
+    return;
   } finally {
     // Always release the render worker's document so its memory is freed even
     // if parsing throws or the user cancels.
     void releaseOcrRenderDocument();
   }
 
-  const hasText = pages.some((page) => page.text.trim());
-  if (!hasText) {
-    if (state.ocrMode === "off") {
-      throw new Error("这份 PDF 更像扫描图片，当前已关闭扫描识别。请打开扫描识别后重试。");
-    }
-    throw new Error("扫描版 PDF 仍未识别出文字，请尝试切换到中英混合识别。");
+  if (importNonce !== activeImportNonce) {
+    publisher.stop();
+    return;
+  }
+  publisher.finish(pendingPages, { ocrPageCount, cachedOcrPages });
+}
+
+function createPdfProgressivePublisher(file, fileKey, totalPages) {
+  const bookId = `book-pdf-${fileKey}`;
+  const baseTitle = stripFileExtension(file.name);
+  const progressSubtitle = (pageNumber) => `PDF 共 ${totalPages} 页 · 前 ${pageNumber} 页已就绪，后续章节解析中…`;
+
+  return {
+    bookId,
+    published: false,
+    publishedPageCount: 0,
+    resumeProgress: null,
+
+    maybePublish(pendingPages, { pageNumber, startedAt }) {
+      if (!this.published) {
+        const remaining = totalPages - pageNumber;
+        if (
+          pageNumber < PDF_PROGRESSIVE_MIN_PAGES ||
+          remaining < PDF_PROGRESSIVE_MIN_REMAINING ||
+          pendingPages.reduce((sum, page) => sum + page.text.length, 0) < PDF_PROGRESSIVE_MIN_CHARS
+        ) {
+          return;
+        }
+        const slowEnough =
+          Date.now() - startedAt >= PDF_PROGRESSIVE_PUBLISH_AFTER_MS || totalPages >= PDF_PROGRESSIVE_FORCE_PAGES;
+        if (!slowEnough) {
+          return;
+        }
+        if (this.publishFirst(pendingPages.slice(), pageNumber)) {
+          this.published = true;
+          this.publishedPageCount = pageNumber;
+          state.backgroundImportBookId = bookId;
+          pendingPages.length = 0;
+        }
+        return;
+      }
+      if (pendingPages.length >= PDF_APPEND_BATCH_PAGES) {
+        this.appendBatch(pendingPages.splice(0));
+      }
+    },
+
+    publishFirst(pages, pageNumber) {
+      const sections = splitPdfPagesIntoSections(pages, file.name);
+      if (!sections.length) {
+        return false;
+      }
+      try {
+        finalizeBook(
+          {
+            title: baseTitle,
+            subtitle: progressSubtitle(pageNumber),
+            format: "PDF",
+            sections,
+            sourceHint: "边解析边听：后台完成的章节会自动追加到目录。",
+          },
+          { bookId, progress: this.resumeProgress },
+        );
+      } catch {
+        // Normalization can reject boilerplate-only opening pages — keep
+        // collecting and try again with more pages.
+        return false;
+      }
+      setStatus(`前 ${pageNumber} 页已就绪，可以开始收听`);
+      return true;
+    },
+
+    appendBatch(pages) {
+      if (!pages.length || !state.book || state.bookId !== bookId) {
+        return;
+      }
+      const lastPageNumber = pages[pages.length - 1]?.pageNumber || this.publishedPageCount;
+      appendSectionsToBook(splitPdfPagesIntoSections(pages, file.name));
+      this.publishedPageCount = lastPageNumber;
+      if (state.book && state.bookId === bookId) {
+        state.book.subtitle = progressSubtitle(lastPageNumber);
+        dom.bookSubtitle.textContent = state.book.subtitle;
+      }
+    },
+
+    flush(pendingPages) {
+      this.appendBatch(pendingPages.splice(0));
+    },
+
+    stop() {
+      if (state.backgroundImportBookId === bookId) {
+        state.backgroundImportBookId = "";
+      }
+    },
+
+    finish(pendingPages, { ocrPageCount, cachedOcrPages }) {
+      const subtitle = ocrPageCount
+        ? `PDF 共 ${totalPages} 页，其中 ${ocrPageCount} 页通过扫描识别补出正文${
+            cachedOcrPages ? `（${cachedOcrPages} 页沿用上次识别缓存）` : ""
+          }。`
+        : `PDF 共 ${totalPages} 页，已转换为可朗读章节。`;
+      const sourceHint = ocrPageCount
+        ? "已自动识别扫描页；如果需要中文扫描识别，可切到中英混合模式。"
+        : "优先识别章标题；识别不到时自动按页数和文本长度回退分段。";
+
+      if (!this.published) {
+        const pages = pendingPages.splice(0);
+        if (!pages.some((page) => page.text.trim())) {
+          if (state.ocrMode === "off") {
+            throw new Error("这份 PDF 更像扫描图片，当前已关闭扫描识别。请打开扫描识别后重试。");
+          }
+          throw new Error("扫描版 PDF 仍未识别出文字，请尝试切换到中英混合识别。");
+        }
+        finalizeBook(
+          {
+            title: baseTitle,
+            subtitle,
+            format: "PDF",
+            sections: splitPdfPagesIntoSections(pages, file.name),
+            sourceHint,
+          },
+          { bookId, progress: this.resumeProgress },
+        );
+        setStatus(`${file.name} 已载入`);
+        return;
+      }
+
+      this.flush(pendingPages);
+      this.stop();
+      if (state.book && state.bookId === bookId) {
+        state.book.subtitle = subtitle;
+        state.book.sourceHint = sourceHint;
+        dom.bookSubtitle.textContent = subtitle;
+        if (!state.bookTransient) {
+          void persistBookToLibrary();
+        }
+        setStatus(`${file.name} 已全部解析完成`);
+        maybeResumeSpeechAfterAppend();
+      }
+    },
+  };
+}
+
+// Appends newly parsed sections to the live book. Sections are only ever added
+// past the end, so the current reading position and highlights stay untouched.
+function appendSectionsToBook(rawSections) {
+  if (!state.book || !rawSections?.length) {
+    return;
+  }
+  const offset = state.book.sections.length;
+  const prepared = rawSections
+    .map((section, index) => ({
+      id: `section-${offset + index + 1}`,
+      title: cleanHeading(section.title || `章节 ${offset + index + 1}`),
+      text: cleanDisplayText(section.text || ""),
+      sourceHint: section.sourceHint || "",
+    }))
+    .filter((section) => section.text.trim());
+  if (!prepared.length) {
+    return;
   }
 
-  const sections = splitPdfPagesIntoSections(pages, file.name);
-  return {
-    title: stripFileExtension(file.name),
-    subtitle: ocrPageCount
-      ? `PDF 共 ${pdf.numPages} 页，其中 ${ocrPageCount} 页通过扫描识别补出正文。`
-      : `PDF 共 ${pdf.numPages} 页，已转换为可朗读章节。`,
-    format: "PDF",
-    sections,
-    sourceHint: ocrPageCount
-      ? "已自动识别扫描页；如果需要中文扫描识别，可切到中英混合模式。"
-      : "优先识别章标题；识别不到时自动按页数和文本长度回退分段。",
-  };
+  const appended = normalizeBookSections(prepared, {
+    format: state.book.format,
+    fallbackTitle: cleanHeading(state.book.title || "正文"),
+  }).map((section, index) => ({ ...section, id: `section-${offset + index + 1}` }));
+  if (!appended.length) {
+    return;
+  }
+
+  state.book.sections.push(...appended);
+  state.book.totalCharacters += appended.reduce((sum, section) => sum + section.text.length, 0);
+  state.book.totalParagraphs += appended.reduce((sum, section) => sum + getSectionParagraphCount(section), 0);
+
+  refreshBookUiAfterAppend();
+  if (!state.bookTransient) {
+    void persistBookToLibrary();
+  }
+  maybeResumeSpeechAfterAppend();
+}
+
+function refreshBookUiAfterAppend() {
+  const sectionCount = state.book.sections.length;
+  dom.chapterCount.textContent = String(sectionCount);
+  dom.charCount.textContent = formatCount(state.book.totalCharacters);
+  dom.chapterSelectLabel.textContent = `共 ${sectionCount} 章 · ${state.book.totalParagraphs || 0} 段`;
+  renderChapterChips();
+  dom.chapterSelect.value = String(state.currentSectionIndex);
+  dom.currentChapterMetric.textContent = `${state.currentSectionIndex + 1}/${sectionCount}`;
+  dom.readerPositionPill.textContent = `${state.currentSectionIndex + 1} / ${sectionCount}`;
+  updateProgressDisplays();
+}
+
+// When listening outran the background parser (speech hit the end of the last
+// available chapter), continue automatically once new chapters arrive.
+function maybeResumeSpeechAfterAppend() {
+  if (!state.awaitingMoreSections || state.speaking) {
+    return;
+  }
+  const nextSectionIndex = findNextReadableSectionIndex(state.currentSectionIndex + 1);
+  if (nextSectionIndex < 0) {
+    return;
+  }
+  state.awaitingMoreSections = false;
+  setCurrentSection(nextSectionIndex, { resetParagraph: true, resetSentence: true });
+  void startSpeech();
+}
+
+async function computePdfFileKey(buffer, file) {
+  try {
+    if (crypto?.subtle?.digest) {
+      const digest = await crypto.subtle.digest("SHA-256", buffer);
+      return [...new Uint8Array(digest).slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+  } catch {
+    // Fall through to the metadata fingerprint (e.g. non-secure contexts).
+  }
+  const seed = `${file.name}::${file.size}::${file.lastModified || 0}`;
+  let hash = 5381;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = ((hash << 5) + hash + seed.charCodeAt(index)) >>> 0;
+  }
+  return `meta-${hash.toString(36)}-${file.size}`;
 }
 
 async function parseEpubFile(file) {
@@ -1157,31 +1444,7 @@ function finalizeMergedEpubSection(section, index) {
   };
 }
 
-function appendSectionText(previous, next) {
-  if (!next) {
-    return previous;
-  }
-  return previous ? joinFlowingText(previous, next) : next.trim();
-}
 
-// Joins two blocks of running text. When the first block stops mid-sentence
-// (typical for page breaks), the boundary is bridged instead of becoming a
-// paragraph break, so sentences are not torn apart.
-function joinFlowingText(previous, next) {
-  const left = (previous || "").trim();
-  const right = (next || "").trim();
-  if (!left) {
-    return right;
-  }
-  if (!right) {
-    return left;
-  }
-  if (hasStrongSentenceEnding(left) || isShortHeadingLine(left.split("\n").pop() || "") || HEADING_LINE_RE.test(right.split("\n", 1)[0] || "")) {
-    return `${left}\n\n${right}`;
-  }
-  const joiner = shouldInsertSpaceBetween(left, right) ? " " : "";
-  return `${left}${joiner}${right}`;
-}
 
 // --- OCR render worker (OffscreenCanvas + pdf.js, off the main thread) ---
 // The worker does page rendering and pixel preprocessing; Tesseract recognition
@@ -1255,7 +1518,10 @@ function sendOcrRenderMessage(payload, transfer = []) {
   });
 }
 
-async function loadOcrRenderDocument(buffer) {
+// Loads the document into the render worker from the original File handle.
+// Structured-cloning a File is practically free (it is disk-backed); the bytes
+// are read inside the worker, keeping the main thread free of a second copy.
+async function loadOcrRenderDocument(file) {
   const worker = ensureOcrRenderWorker();
   if (!worker) {
     return false;
@@ -1263,7 +1529,7 @@ async function loadOcrRenderDocument(buffer) {
   if (state.ocrRenderLoaded) {
     return true;
   }
-  await sendOcrRenderMessage({ type: "load", buffer }, [buffer]);
+  await sendOcrRenderMessage({ type: "load", file });
   state.ocrRenderLoaded = true;
   return true;
 }
@@ -1739,6 +2005,7 @@ async function openLibraryBook(bookId, options = {}) {
     if (!record || !Array.isArray(record.sections) || !record.sections.length) {
       return false;
     }
+    beginBookLoad();
     finalizeBook(
       {
         title: record.title,
@@ -1894,7 +2161,10 @@ function setCurrentSection(index, options = {}) {
   updateProgressDisplays();
   updateSpeechProgress();
   updateMediaSessionMetadata();
-  schedulePersistProgress();
+  // Chapter switches are infrequent and losing one to the debounce window is
+  // very visible (reload restores the wrong chapter), so persist immediately;
+  // high-frequency sentence progress keeps using the debounced path.
+  void persistProgressNow();
 }
 
 function renderCurrentSection() {
@@ -2363,9 +2633,97 @@ function stopSpeechKeepAlive() {
   state.keepAliveTimer = 0;
 }
 
+// --- Lock-screen media anchor ---
+// speechSynthesis output is not a real media stream, so mobile browsers often
+// refuse to attach lock-screen / notification media controls to it and may
+// suspend the tab's audio session in the background. A looping, practically
+// inaudible <audio> element keeps a genuine audio session alive while reading,
+// which anchors the Media Session (metadata, play/pause/next controls) to the
+// page. The bridge-voice path plays real audio already, but running the anchor
+// alongside it is harmless and avoids per-sentence flapping.
+
+let mediaAnchorUrl = "";
+
+// 4 s of 37 Hz sine at amplitude 96/32767 (≈ −51 dBFS): phone speakers cannot
+// reproduce it, but it is not digital silence, so the browser still treats the
+// element as an audible media session.
+function buildMediaAnchorWavBlob() {
+  const sampleRate = 8000;
+  const sampleCount = sampleRate * 4;
+  const buffer = new ArrayBuffer(44 + sampleCount * 2);
+  const view = new DataView(buffer);
+  const writeAscii = (offset, text) => {
+    for (let index = 0; index < text.length; index += 1) {
+      view.setUint8(offset + index, text.charCodeAt(index));
+    }
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, "data");
+  view.setUint32(40, sampleCount * 2, true);
+  for (let index = 0; index < sampleCount; index += 1) {
+    view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 37 * index) / sampleRate) * 96), true);
+  }
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function getMediaAnchorAudio() {
+  if (state.mediaAnchorAudio) {
+    return state.mediaAnchorAudio;
+  }
+  try {
+    if (!mediaAnchorUrl) {
+      mediaAnchorUrl = URL.createObjectURL(buildMediaAnchorWavBlob());
+    }
+    const audio = new Audio(mediaAnchorUrl);
+    audio.id = "media-anchor-audio";
+    audio.loop = true;
+    audio.volume = 0.05;
+    audio.preload = "auto";
+    audio.setAttribute("playsinline", "");
+    audio.hidden = true;
+    document.body.appendChild(audio);
+    state.mediaAnchorAudio = audio;
+  } catch {
+    state.mediaAnchorAudio = null;
+  }
+  return state.mediaAnchorAudio;
+}
+
+function startMediaAnchor() {
+  const audio = getMediaAnchorAudio();
+  if (!audio) {
+    return;
+  }
+  const playPromise = audio.play();
+  if (playPromise && typeof playPromise.catch === "function") {
+    // Autoplay policies can reject a play() outside a user gesture; the anchor
+    // is an enhancement, so reading simply continues without it.
+    playPromise.catch(() => {});
+  }
+}
+
+function stopMediaAnchor() {
+  try {
+    state.mediaAnchorAudio?.pause();
+  } catch {
+    // Ignore pause failures.
+  }
+}
+
 function onSpeechPlaybackStarted() {
   void acquireWakeLock();
   startSpeechKeepAlive();
+  startMediaAnchor();
   updateMediaSessionMetadata();
   setMediaSessionPlaybackState("playing");
 }
@@ -2374,6 +2732,7 @@ function onSpeechPlaybackStopped(options = {}) {
   releaseWakeLock();
   stopSpeechKeepAlive();
   clearBoundaryFallbackTimers();
+  stopMediaAnchor();
   setMediaSessionPlaybackState(options.paused ? "paused" : "none");
   void persistProgressNow();
 }
@@ -2557,244 +2916,15 @@ function recordSpeechTiming(startedAt, text) {
     state.speechMsPerCharEwma > 0 ? state.speechMsPerCharEwma * 0.6 + msPerChar * 0.4 : msPerChar;
 }
 
-function splitPlainTextIntoSections(rawText, fallbackName) {
-  const normalized = normalizeLineBreaks(rawText);
-  const matches = [...normalized.matchAll(CHAPTER_HEADING_RE)];
 
-  if (matches.length >= 2) {
-    const sections = [];
-    matches.forEach((match, index) => {
-      const start = match.index ?? 0;
-      const end = index + 1 < matches.length ? matches[index + 1].index ?? normalized.length : normalized.length;
-      const heading = cleanHeading(match[0]);
-      const content = normalized.slice(start + match[0].length, end).trim();
-      if (!content) {
-        return;
-      }
-      sections.push({
-        id: `section-${sections.length + 1}`,
-        title: heading,
-        text: content,
-        sourceHint: "按文本标题拆分",
-      });
-    });
-    if (sections.length) {
-      return sections;
-    }
-  }
 
-  return fallbackChunkSections(normalized, stripFileExtension(fallbackName), "按段落长度自动分段");
-}
 
-function splitPdfPagesIntoSections(pages, fallbackName) {
-  const sections = [];
-  let current = null;
 
-  pages.forEach((page, index) => {
-    const heading = detectHeadingFromPage(page.text);
-    // Splitting mid-sentence breaks the reading flow at every section edge,
-    // so length-based splits wait for a sentence boundary (with a hard cap).
-    const endsCleanly = !current || hasStrongSentenceEnding(current.text);
-    const lengthSplit = current && endsCleanly && (current.text.length > 2600 || current.pages.length >= 4);
-    const hardSplit = current && (current.text.length > 5200 || current.pages.length >= 7);
-    const shouldStartNewSection = Boolean(heading) || !current || lengthSplit || hardSplit;
 
-    if (shouldStartNewSection) {
-      if (current?.text.trim()) {
-        sections.push(createPdfSection(current, sections.length));
-      }
-      current = {
-        title: heading || `PDF 分段 ${sections.length + 1}`,
-        text: "",
-        pages: [],
-      };
-    }
 
-    current.pages.push(page);
-    current.text = joinFlowingText(current.text, page.text);
 
-    if (index === pages.length - 1 && current.text.trim()) {
-      sections.push(createPdfSection(current, sections.length));
-    }
-  });
 
-  return sections.length
-    ? sections
-    : fallbackChunkSections(
-        pages.map((page) => page.text).join("\n\n"),
-        stripFileExtension(fallbackName),
-        "未识别到 PDF 标题，已按文本长度自动分段",
-      );
-}
 
-function createPdfSection(current, index) {
-  const startPage = current.pages[0]?.pageNumber || 1;
-  const endPage = current.pages[current.pages.length - 1]?.pageNumber || startPage;
-  const ocrCount = current.pages.filter((page) => page.ocrUsed).length;
-  return {
-    id: `section-${index + 1}`,
-    title: cleanHeading(current.title || `PDF 分段 ${index + 1}`),
-    text: current.text.trim(),
-    sourceHint: `第 ${startPage} - ${endPage} 页${ocrCount ? ` · OCR ${ocrCount} 页` : ""}`,
-  };
-}
-
-function repairOcrLineBreaks(text) {
-  const normalized = removeRepeatedOcrLines(
-    normalizeLineBreaks(text)
-      .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
-      .replace(/[ \t]+$/gm, "")
-      .replace(/[|｜]{2,}/g, " ")
-      .replace(/\b([A-Za-z])\s+([,.;:!?])\b/g, "$1$2")
-      .replace(/\n\s*(?:第\s*)?\d{1,4}\s*(?:页|page)?\s*\n/gi, "\n")
-      .replace(/\n{3,}/g, "\n\n"),
-  )
-    .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
-    .replace(/\n{3,}/g, "\n\n");
-  const blocks = normalized.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean);
-
-  return blocks
-    .map((block) => mergeWrappedLines(block).join("\n\n"))
-    .join("\n\n")
-    .replace(/([^\n。！？!?\.])\n(?=[^\n])/g, "$1 ")
-    .replace(/[ \t]*([，。！？；：、,.!?;:])[ \t]*/g, "$1")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function removeRepeatedOcrLines(text) {
-  const lines = normalizeLineBreaks(text).split("\n");
-  const counts = new Map();
-
-  lines.forEach((line) => {
-    const key = normalizeOcrLineKey(line);
-    if (key) {
-      counts.set(key, (counts.get(key) || 0) + 1);
-    }
-  });
-
-  return lines
-    .filter((line, index) => {
-      const trimmed = normalizeWhitespace(line);
-      if (!trimmed) {
-        return true;
-      }
-      const key = normalizeOcrLineKey(trimmed);
-      if (key && counts.get(key) >= 2 && trimmed.length <= 90) {
-        return false;
-      }
-      if (shouldDropOcrNoiseLine(trimmed, index, lines.length)) {
-        return false;
-      }
-      return true;
-    })
-    .join("\n");
-}
-
-function normalizeOcrLineKey(line) {
-  const key = normalizeWhitespace(line)
-    .toLowerCase()
-    .replace(/\d+/g, "#")
-    .replace(/[^a-z#\u4e00-\u9fa5]+/g, "");
-  return key.length >= 8 ? key : "";
-}
-
-function shouldDropOcrNoiseLine(line, index, totalLines) {
-  const trimmed = normalizeWhitespace(line);
-  if (!trimmed) {
-    return false;
-  }
-  if (OCR_NOISE_LINE_RE.test(trimmed)) {
-    return true;
-  }
-  const meaningful = countMeaningfulCharacters(trimmed);
-  const compactLength = trimmed.replace(/\s/g, "").length || 1;
-  const symbolRatio = (trimmed.match(/[^\sA-Za-z0-9\u4e00-\u9fa5，。！？；：、,.!?;:'"“”‘’\-/#]/g) || []).length / compactLength;
-  const nearPageEdge = index <= 2 || index >= totalLines - 3;
-  return (nearPageEdge && trimmed.length <= 8 && meaningful <= 4) || (symbolRatio > 0.5 && meaningful <= 6);
-}
-
-function fallbackChunkSections(text, titleSeed, sourceHint) {
-  const paragraphs = splitIntoParagraphs(text);
-  const chunks = [];
-  let bucket = [];
-  let length = 0;
-
-  paragraphs.forEach((paragraph) => {
-    const nextLength = length + paragraph.length;
-    if (bucket.length && nextLength > KEEP_SECTION_TARGET_CHARS) {
-      chunks.push(bucket.join("\n\n"));
-      bucket = [paragraph];
-      length = paragraph.length;
-      return;
-    }
-    bucket.push(paragraph);
-    length = nextLength;
-  });
-
-  if (bucket.length) {
-    chunks.push(bucket.join("\n\n"));
-  }
-
-  return chunks.map((chunk, index) => ({
-    id: `section-${index + 1}`,
-    title: `${titleSeed} · 分段 ${index + 1}`,
-    text: chunk,
-    sourceHint,
-  }));
-}
-
-function detectHeadingFromPage(text) {
-  const lines = text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 10);
-
-  return lines.find((line) =>
-    /^(chapter|part)\s+\d+|^第[一二三四五六七八九十百千万0-9]+[章节卷部篇回]|^(序章|序言|前言|引言|后记|尾声|番外)/i.test(line),
-  );
-}
-
-function pdfTextItemsToString(items) {
-  const normalizedItems = items
-    .map((item) => ({
-      text: item.str || "",
-      x: item.transform?.[4] || 0,
-      y: item.transform?.[5] || 0,
-    }))
-    .filter((item) => item.text.trim());
-
-  normalizedItems.sort((left, right) => {
-    if (Math.abs(left.y - right.y) > 2) {
-      return right.y - left.y;
-    }
-    return left.x - right.x;
-  });
-
-  let currentY = null;
-  let line = [];
-  const lines = [];
-
-  normalizedItems.forEach((item) => {
-    if (currentY === null || Math.abs(item.y - currentY) <= 2.5) {
-      line.push(item.text);
-      currentY = currentY === null ? item.y : currentY;
-      return;
-    }
-
-    lines.push(line.join(" "));
-    line = [item.text];
-    currentY = item.y;
-  });
-
-  if (line.length) {
-    lines.push(line.join(" "));
-  }
-
-  return lines.join("\n");
-}
 
 function flattenToc(toc, collector = []) {
   if (!Array.isArray(toc)) {
@@ -2819,327 +2949,20 @@ function htmlToPlainText(html) {
   return doc.body?.textContent || "";
 }
 
-function splitIntoParagraphs(text) {
-  const blocks = buildParagraphBlocks(text);
-  if (!blocks.length) {
-    return [];
-  }
 
-  const paragraphs = [];
 
-  blocks.forEach((block) => {
-    const sentences = splitIntoSentences(block);
-    if (!sentences.length) {
-      paragraphs.push(block);
-      return;
-    }
 
-    let bucket = "";
-    sentences.forEach((sentence) => {
-      const cleanSentence = normalizeWhitespace(sentence);
-      if (!cleanSentence) {
-        return;
-      }
 
-      if (!bucket) {
-        bucket = cleanSentence;
-        return;
-      }
 
-      const merged = `${bucket}${joinSentences(bucket, cleanSentence)}${cleanSentence}`.trim();
-      const shouldKeepMerging =
-        bucket.length < MIN_PARAGRAPH_CHARS ||
-        cleanSentence.length < 16 ||
-        merged.length <= IDEAL_PARAGRAPH_CHARS ||
-        !hasStrongSentenceEnding(bucket);
 
-      if (shouldKeepMerging && merged.length <= MAX_PARAGRAPH_CHARS) {
-        bucket = merged;
-        return;
-      }
 
-      paragraphs.push(bucket);
-      bucket = cleanSentence;
-    });
 
-    if (bucket) {
-      paragraphs.push(bucket);
-    }
-  });
 
-  return mergeTinyParagraphs(paragraphs);
-}
 
-function splitIntoSentences(text) {
-  const normalized = normalizeReadableText(text).replace(/\n+/g, " ");
-  if (!normalized) {
-    return [];
-  }
 
-  const segmented = segmentWithIntl(normalized);
-  if (segmented.length) {
-    return mergeUnsafeSentenceFragments(segmented);
-  }
 
-  const sentences = [];
-  let buffer = "";
 
-  for (let index = 0; index < normalized.length; index += 1) {
-    const char = normalized[index];
-    buffer += char;
-    if (isSentenceBoundary(buffer, normalized.slice(index + 1))) {
-      const sentence = normalizeWhitespace(buffer);
-      if (sentence) {
-        sentences.push(sentence);
-      }
-      buffer = "";
-    }
-  }
 
-  const tail = normalizeWhitespace(buffer);
-  if (tail) {
-    sentences.push(tail);
-  }
-
-  return mergeUnsafeSentenceFragments(sentences);
-}
-
-function buildParagraphBlocks(text) {
-  const normalized = cleanDisplayText(text);
-
-  if (!normalized) {
-    return [];
-  }
-
-  return normalized
-    .split(/\n{2,}/)
-    .map((block) => mergeWrappedLines(block))
-    .flat()
-    .map((block) => cleanDisplayText(block))
-    .filter(Boolean);
-}
-
-function mergeWrappedLines(block) {
-  const lines = block
-    .split("\n")
-    .map((line) => cleanDisplayText(line))
-    .filter(Boolean);
-  if (!lines.length) {
-    return [];
-  }
-
-  const wrappedMode = looksLikeWrappedTextBlock(lines);
-  const merged = [];
-  lines.forEach((line) => {
-    if (!merged.length) {
-      merged.push(line);
-      return;
-    }
-
-    const previous = merged[merged.length - 1];
-    if (shouldStartNewParagraph(previous, line, wrappedMode)) {
-      merged.push(line);
-    } else {
-      const cleanedPrevious = previous.replace(/-\s*$/, "");
-      merged[merged.length - 1] = `${cleanedPrevious}${joinSentences(cleanedPrevious, line)}${line}`.trim();
-    }
-  });
-
-  return merged;
-}
-
-function looksLikeWrappedTextBlock(lines) {
-  if (lines.length < 3) {
-    return false;
-  }
-
-  const averageLength = lines.reduce((sum, line) => sum + line.length, 0) / Math.max(lines.length, 1);
-  const shortLineCount = lines.filter((line) => line.length <= WRAPPED_BLOCK_SHORT_LINE).length;
-  const softEndingCount = lines.filter((line) => !hasStrongSentenceEnding(line)).length;
-
-  return (
-    averageLength <= WRAPPED_BLOCK_AVERAGE_LINE ||
-    shortLineCount >= Math.ceil(lines.length * 0.6) ||
-    softEndingCount >= Math.ceil(lines.length * 0.5)
-  );
-}
-
-function shouldStartNewParagraph(previous, next, wrappedMode) {
-  if (!previous || !next) {
-    return true;
-  }
-  if (looksLikeStandaloneParagraph(previous) || looksLikeStandaloneParagraph(next) || looksLikeHardParagraphBreak(next)) {
-    return true;
-  }
-  if (!wrappedMode) {
-    if (!hasStrongSentenceEnding(previous)) {
-      return false;
-    }
-    if (previous.length < 26 || next.length < 22) {
-      return false;
-    }
-    return !(/[A-Za-z0-9]$/.test(previous) && /^[a-z0-9]/.test(next));
-  }
-
-  if (!hasStrongSentenceEnding(previous)) {
-    return false;
-  }
-  if (previous.length >= MAX_PARAGRAPH_CHARS) {
-    return true;
-  }
-  return previous.length >= IDEAL_PARAGRAPH_CHARS + 24 && next.length >= MIN_PARAGRAPH_CHARS;
-}
-
-function looksLikeHardParagraphBreak(text) {
-  const trimmed = (text || "").trim();
-  return (
-    !trimmed ||
-    isShortHeadingLine(trimmed) ||
-    /^(?:[-*•●▪◦]|(?:\d+|[A-Za-z])[.)、])\s+/.test(trimmed) ||
-    /^(?:(?:附录|摘要|结论|讨论|方法|结果|引言|致谢)(?:[:：\s]|$)|(?:appendix|abstract|introduction|methods?|results?|discussion|conclusion)\b)/i.test(trimmed)
-  );
-}
-
-function isShortHeadingLine(text) {
-  const trimmed = (text || "").trim();
-  return Boolean(trimmed) && trimmed.length <= 42 && (HEADING_LINE_RE.test(trimmed) || /^[A-Z][A-Z\s:&/-]{3,}$/.test(trimmed));
-}
-
-function isSentenceBoundary(currentText, remainingText) {
-  const char = (currentText || "").at(-1) || "";
-  if (/[。！？!?…；;]/.test(char)) {
-    return true;
-  }
-  if (char !== ".") {
-    return false;
-  }
-  if (shouldKeepPeriodInsideSentence(currentText, remainingText)) {
-    return false;
-  }
-  const next = (remainingText || "").trimStart();
-  return !next || /^[“”"‘’'(\[]?[A-Z0-9\u4e00-\u9fa5]/.test(next);
-}
-
-function shouldKeepPeriodInsideSentence(currentText, remainingText) {
-  const previous = normalizeWhitespace(currentText || "");
-  const next = (remainingText || "").trimStart();
-  if (!previous || !next) {
-    return false;
-  }
-  if (NON_BREAKING_ABBR_RE.test(previous) || INITIALISM_END_RE.test(previous)) {
-    return true;
-  }
-  if (/\d\.$/.test(previous) && /^\d/.test(next)) {
-    return true;
-  }
-  if (/\b(?:ID|No|Ref|MRN|DOB|Tel|Fax|Vol)\s*[:#-]?\s*[A-Z0-9-]*\.$/i.test(previous)) {
-    return true;
-  }
-  if (/\b[A-Za-z]{1,3}\.$/.test(previous) && /^[a-z]/.test(next)) {
-    return true;
-  }
-  return false;
-}
-
-function mergeUnsafeSentenceFragments(sentences) {
-  const merged = [];
-
-  sentences
-    .map((sentence) => normalizeWhitespace(sentence))
-    .filter(Boolean)
-    .forEach((sentence) => {
-      if (!merged.length) {
-        merged.push(sentence);
-        return;
-      }
-
-      const previous = merged[merged.length - 1];
-      if (shouldMergeSentenceFragment(previous, sentence)) {
-        merged[merged.length - 1] = `${previous}${joinSentences(previous, sentence)}${sentence}`.trim();
-        return;
-      }
-
-      merged.push(sentence);
-    });
-
-  return merged;
-}
-
-function shouldMergeSentenceFragment(previous, next) {
-  const prev = normalizeWhitespace(previous || "");
-  const upcoming = normalizeWhitespace(next || "");
-  if (!prev || !upcoming) {
-    return false;
-  }
-  if (shouldKeepPeriodInsideSentence(prev, upcoming)) {
-    return true;
-  }
-  if (!hasStrongSentenceEnding(prev)) {
-    return true;
-  }
-  if (prev.length < OCR_SHORT_FRAGMENT_CHARS && !looksLikeStandaloneParagraph(prev)) {
-    return true;
-  }
-  if (/^[a-z,;:)\]]/.test(upcoming)) {
-    return true;
-  }
-  return false;
-}
-
-function mergeTinyParagraphs(paragraphs) {
-  const merged = [];
-
-  paragraphs
-    .map((paragraph) => cleanDisplayText(paragraph))
-    .filter(Boolean)
-    .forEach((paragraph) => {
-      if (!merged.length) {
-        merged.push(paragraph);
-        return;
-      }
-
-      const previous = merged[merged.length - 1];
-      const shouldMerge =
-        paragraph.length < MIN_PARAGRAPH_CHARS &&
-        previous.length < MAX_PARAGRAPH_CHARS &&
-        !looksLikeStandaloneParagraph(paragraph);
-
-      if (shouldMerge) {
-        merged[merged.length - 1] = `${previous}${joinSentences(previous, paragraph)}${paragraph}`.trim();
-        return;
-      }
-
-      merged.push(paragraph);
-    });
-
-  return merged;
-}
-
-function looksLikeStandaloneParagraph(text) {
-  return (
-    /[:：]\s*\S+$/.test(text) ||
-    /^https?:\/\//i.test(text) ||
-    /^\S+@\S+\.\S+$/.test(text) ||
-    /^\[?\d{1,3}\]?$/.test(text) ||
-    REFERENCE_HEADING_RE.test(text.trim())
-  );
-}
-
-function segmentWithIntl(text) {
-  if (!window.Intl?.Segmenter) {
-    return [];
-  }
-
-  try {
-    const locale = detectSpeechLang(text);
-    const segmenter = new Intl.Segmenter(locale, { granularity: "sentence" });
-    return [...segmenter.segment(text)]
-      .map((item) => normalizeWhitespace(item.segment || ""))
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
 
 function getCurrentSection() {
   return state.book.sections[state.currentSectionIndex];
@@ -3324,10 +3147,6 @@ function shouldRunOcr(text) {
   return countMeaningfulCharacters(text) < OCR_MIN_MEANINGFUL_CHARS || looksLikeLowQualityPdfText(text);
 }
 
-function countMeaningfulCharacters(text) {
-  const matches = text.match(/[A-Za-z0-9\u4e00-\u9fa5]/g);
-  return matches?.length || 0;
-}
 
 function looksLikeLowQualityPdfText(text) {
   const normalized = normalizeWhitespace(text || "");
@@ -3359,64 +3178,12 @@ function isSpeechActive() {
   return ("speechSynthesis" in window && (window.speechSynthesis.speaking || window.speechSynthesis.paused)) || state.speaking || state.paused;
 }
 
-function normalizeReadableText(text) {
-  return normalizeLineBreaks(text)
-    .replace(/\u00a0/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
 
-function stripReferenceArtifacts(text) {
-  return normalizeLineBreaks(text)
-    .replace(LONE_NUMBER_LINE_RE, "\n")
-    .replace(LEADING_REFERENCE_RE, "$1")
-    .replace(BRACKET_REFERENCE_RE, "")
-    .replace(SIMPLE_PAREN_REFERENCE_RE, "")
-    .replace(INLINE_CJK_REFERENCE_RE, "")
-    .replace(INLINE_END_REFERENCE_RE, "")
-    .replace(SUPERSCRIPT_REFERENCE_RE, "")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
 
-function cleanDisplayText(text) {
-  return normalizeReadableText(stripReferenceArtifacts(text));
-}
 
-function sanitizeTextForSpeech(text) {
-  return cleanDisplayText(text)
-    .replace(REFERENCE_SECTION_RE, "")
-    .replace(SIMPLE_PAREN_REFERENCE_RE, "")
-    .replace(SPEECH_FILTER_RE, (match) => (/[—–―]+|\.{3,}|…+/.test(match) ? "，" : ""))
-    .replace(INLINE_SYMBOL_RE, "")
-    .replace(/(^|\s)(?:\d{1,2}|[\[(（【]\d{1,3}[\])）】])(?=(?:\s|$))/g, "$1")
-    .replace(INLINE_END_REFERENCE_RE, "")
-    .replace(SUPERSCRIPT_REFERENCE_RE, "")
-    .replace(/[;；:：/\\]+/g, "，")
-    .replace(/，{2,}/g, "，")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
 
-function hasStrongSentenceEnding(text) {
-  return /[。！？!?…]["”’')\]]*$/.test(text.trim());
-}
 
-function joinSentences(previous, next) {
-  return shouldInsertSpaceBetween(previous, next) ? " " : "";
-}
 
-function shouldInsertSpaceBetween(previous, next) {
-  const left = (previous || "").trim();
-  const right = (next || "").trim();
-  if (!left || !right || !/^[A-Za-z0-9]/.test(right)) {
-    return false;
-  }
-  return /[A-Za-z0-9](?:[.!?;:,]["”’')\]]*)?$/.test(left);
-}
 
 function getVoiceBucket(lang) {
   const normalized = (lang || "").trim().toLowerCase().replace(/_/g, "-");
@@ -3751,30 +3518,6 @@ async function resetSpeechEngine() {
   }
 }
 
-function detectSpeechLang(text) {
-  const normalized = text || "";
-  const japaneseCount = (normalized.match(/[ぁ-ゟ゠-ヿ]/g) || []).length;
-  const koreanCount = (normalized.match(/[가-힣]/g) || []).length;
-  const cyrillicCount = (normalized.match(/[А-Яа-яЁё]/g) || []).length;
-  const chineseCount = (normalized.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const latinCount = (normalized.match(/[A-Za-z]/g) || []).length;
-  if (japaneseCount > 0) {
-    return "ja-JP";
-  }
-  if (koreanCount > 0) {
-    return "ko-KR";
-  }
-  if (cyrillicCount > 0) {
-    return "ru-RU";
-  }
-  if (chineseCount > 0 && (latinCount === 0 || chineseCount * 4 >= latinCount)) {
-    return /zh-(TW|HK|MO)/i.test(navigator.language || "") ? "zh-TW" : "zh-CN";
-  }
-  if (latinCount > 0) {
-    return /en-GB/i.test(navigator.language || "") ? "en-GB" : "en-US";
-  }
-  return navigator.language || "zh-CN";
-}
 
 function shouldRetryWithFallbackVoice(event, selectedVoice) {
   const errorCode = event?.error || "";
@@ -3895,25 +3638,9 @@ function getExtension(fileName) {
   return fileName.split(".").pop()?.toLowerCase() || "";
 }
 
-function stripFileExtension(fileName) {
-  return fileName.replace(/\.[^.]+$/, "");
-}
 
-function cleanHeading(input) {
-  return input.replace(/^#+\s*/, "").replace(/\s+/g, " ").trim();
-}
 
-function normalizeLineBreaks(text) {
-  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-}
 
-function normalizeWhitespace(text) {
-  return normalizeLineBreaks(text)
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
 
 function normalizeHref(href) {
   return (href || "")
@@ -3925,218 +3652,21 @@ function normalizeHref(href) {
     .toLowerCase();
 }
 
-function normalizeSectionKey(text) {
-  return cleanHeading(text || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "");
-}
 
-function stripLeadingHeadingFromText(text, title) {
-  const lines = normalizeLineBreaks(text).split("\n").map((line) => line.trim()).filter(Boolean);
-  if (!lines.length) {
-    return "";
-  }
 
-  const titleKey = normalizeSectionKey(title);
-  if (titleKey && normalizeSectionKey(lines[0]) === titleKey) {
-    const trimmed = lines.slice(1).join("\n").trim();
-    return trimmed || lines[0];
-  }
 
-  return text.trim();
-}
 
-function normalizeBookSections(sections, options = {}) {
-  const prepared = sections.map((section, index) => prepareSectionForReading(section, index)).filter(Boolean);
-  const filtered = prepared.filter((section, index, collection) => !shouldDropSection(section, index, collection));
-  const candidates = filtered.length ? filtered : prepared;
-  const merged = mergeShortSections(candidates, options);
 
-  return merged
-    .map((section, index) => finalizeNormalizedSection(section, index, options))
-    .filter(Boolean);
-}
 
-function prepareSectionForReading(section, index) {
-  const rawLines = normalizeLineBreaks(section.text || "")
-    .split("\n")
-    .map((line) => cleanDisplayText(line))
-    .filter(Boolean);
-  const text = normalizeSectionBody(section.text || "");
-  if (!text) {
-    return null;
-  }
-  return {
-    ...section,
-    id: section.id || `section-${index + 1}`,
-    title: cleanHeading(section.title || `Section ${index + 1}`),
-    text,
-    rawLines,
-  };
-}
 
-function normalizeSectionBody(text) {
-  const filteredBlocks = buildParagraphBlocks(text).filter((block) => !shouldDropBlock(block));
-  if (!filteredBlocks.length) {
-    return "";
-  }
-  return splitIntoParagraphs(filteredBlocks.join("\n\n")).join("\n\n").trim();
-}
 
-function shouldDropBlock(block) {
-  const trimmed = cleanDisplayText(block);
-  if (!trimmed) {
-    return true;
-  }
-  if (PAGE_ARTIFACT_RE.test(trimmed) || REFERENCE_HEADING_RE.test(trimmed.trim())) {
-    return true;
-  }
-  if (trimmed.length <= 96 && BOILERPLATE_LINE_RE.test(trimmed)) {
-    return true;
-  }
-  return isLikelyTocBlock(trimmed);
-}
 
-function isLikelyTocBlock(text) {
-  const lines = normalizeLineBreaks(text)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length < 2) {
-    return false;
-  }
-  const tocCount = lines.filter((line) => TOC_LINE_RE.test(line)).length;
-  return tocCount >= 2 && tocCount >= Math.ceil(lines.length * 0.6);
-}
 
-function shouldDropSection(section, index, collection) {
-  if (!section.text.trim()) {
-    return true;
-  }
 
-  const title = section.title || "";
-  const rawLines = section.rawLines || [];
-  const boilerplateCount = rawLines.filter((line) => line.length <= 120 && BOILERPLATE_LINE_RE.test(line)).length;
-  const tocCount = rawLines.filter((line) => TOC_LINE_RE.test(line)).length;
-  const mostlyBoilerplate = rawLines.length >= 2 && boilerplateCount >= Math.ceil(rawLines.length * 0.5);
-  const mostlyToc = rawLines.length >= 3 && tocCount >= Math.ceil(rawLines.length * 0.55);
 
-  if (mostlyBoilerplate) {
-    return true;
-  }
-  if (BOILERPLATE_TITLE_RE.test(title) && section.text.length < KEEP_SECTION_TARGET_CHARS) {
-    return true;
-  }
-  if (mostlyToc && section.text.length < AGGRESSIVE_SECTION_MERGE_CHARS) {
-    return true;
-  }
-  if (index === 0 && rawLines.length && rawLines.every((line) => BOILERPLATE_LINE_RE.test(line) || TOC_LINE_RE.test(line))) {
-    return true;
-  }
-  return collection.length > 80 && isGenericSectionTitle(title) && section.text.length < SHORT_SECTION_MERGE_CHARS;
-}
 
-function mergeShortSections(sections, options = {}) {
-  if (!sections.length) {
-    return [];
-  }
 
-  const aggressive = (options.format === "EPUB" && sections.length > 60) || sections.length > 120;
-  const mergeLimit = aggressive ? AGGRESSIVE_SECTION_MERGE_CHARS : SHORT_SECTION_MERGE_CHARS;
-  const merged = [];
 
-  sections.forEach((section) => {
-    const previous = merged[merged.length - 1];
-    const currentShort = section.text.length < mergeLimit;
-    const previousShort = previous && previous.text.length < mergeLimit;
-    const canSoftMerge =
-      previous &&
-      (aggressive || isGenericSectionTitle(previous.title) || isGenericSectionTitle(section.title));
-    const shouldMerge =
-      previous &&
-      previous.text.length + section.text.length <= KEEP_SECTION_TARGET_CHARS &&
-      (currentShort || previousShort) &&
-      canSoftMerge &&
-      (aggressive || !(isMajorSectionTitle(previous.title) && isMajorSectionTitle(section.title)));
-
-    if (!shouldMerge) {
-      merged.push({ ...section });
-      return;
-    }
-
-    previous.text = appendSectionText(previous.text, section.text);
-    previous.sourceHint = mergeSourceHint(previous.sourceHint, section.sourceHint);
-    previous.rawLines = [...(previous.rawLines || []), ...(section.rawLines || [])];
-    if (isGenericSectionTitle(previous.title) && !isGenericSectionTitle(section.title)) {
-      previous.title = section.title;
-    }
-  });
-
-  return merged;
-}
-
-function finalizeNormalizedSection(section, index, options = {}) {
-  const paragraphs = splitIntoParagraphs(section.text);
-  const text = paragraphs.join("\n\n").trim();
-  if (!text) {
-    return null;
-  }
-
-  const preview = buildSectionPreview(text);
-  return {
-    id: `section-${index + 1}`,
-    title: resolveSectionTitle(section.title, preview, index, options.fallbackTitle),
-    text,
-    paragraphs,
-    paragraphCount: paragraphs.length || 1,
-    preview,
-    sourceHint: section.sourceHint || "",
-  };
-}
-
-function resolveSectionTitle(title, preview, index, fallbackTitle) {
-  const cleanedTitle = cleanHeading(title || "");
-  if (cleanedTitle && !BOILERPLATE_TITLE_RE.test(cleanedTitle) && !isGenericSectionTitle(cleanedTitle)) {
-    return cleanedTitle;
-  }
-  if (preview) {
-    return preview;
-  }
-  return `${fallbackTitle || "正文"} · ${index + 1}`;
-}
-
-function buildSectionPreview(text) {
-  const sentence = splitIntoSentences(text)[0] || splitIntoParagraphs(text)[0] || "";
-  const normalized = normalizeWhitespace(sentence);
-  if (!normalized) {
-    return "";
-  }
-  return normalized.length > SECTION_PREVIEW_CHARS ? `${normalized.slice(0, SECTION_PREVIEW_CHARS).trim()}…` : normalized;
-}
-
-function isGenericSectionTitle(title) {
-  const normalized = cleanHeading(title || "");
-  return !normalized || GENERIC_SECTION_TITLE_RE.test(normalized);
-}
-
-function isMajorSectionTitle(title) {
-  const normalized = cleanHeading(title || "");
-  return Boolean(normalized) && (HEADING_LINE_RE.test(normalized) || /^(?:chapter|part|section)\s+\d+/i.test(normalized));
-}
-
-function mergeSourceHint(previous, next) {
-  if (!previous) {
-    return next || "";
-  }
-  if (!next || previous === next) {
-    return previous;
-  }
-  return `${previous} · ${next}`;
-}
-
-function getSectionParagraphCount(section) {
-  return section?.paragraphCount || section?.paragraphs?.length || splitIntoParagraphs(section?.text || "").length || 0;
-}
 
 function refreshReaderDashboardMeta(paragraphs = getCurrentParagraphs(), bookPercent = null) {
   if (!state.book) {
@@ -4166,10 +3696,6 @@ function formatSectionSelectLabel(section, index, totalCount) {
   return `${prefix} · ${section.title}${detail} · ${paragraphCount} 段`;
 }
 
-isMajorSectionTitle = function (title) {
-  const normalized = cleanHeading(title || "");
-  return Boolean(normalized) && /^(?:chapter|part|section)\s+\d+|^第[\u4e00-\u9fa50-9零一二三四五六七八九十百千万两〇]+[章节卷部篇回]/i.test(normalized);
-};
 
 function cleanVoiceDisplayName(name) {
   const original = (name || "Unnamed").trim();
@@ -4460,43 +3986,6 @@ waitForVoices = async function (timeoutMs = 1800) {
   });
 };
 
-detectSpeechLang = function (text) {
-  const normalized = normalizeWhitespace(text || "");
-  const japaneseCount = (normalized.match(/[ぁ-ゟ゠-ヿ]/g) || []).length;
-  const koreanCount = (normalized.match(/[가-힣]/g) || []).length;
-  const cyrillicCount = (normalized.match(/[А-Яа-яЁё]/g) || []).length;
-  const chineseCount = (normalized.match(/[\u4e00-\u9fa5]/g) || []).length;
-  const latinCount = (normalized.match(/[A-Za-z]/g) || []).length;
-  const digitCount = (normalized.match(/\d/g) || []).length;
-  const englishWordCount = (normalized.match(/[A-Za-z]{2,}/g) || []).length;
-  const englishSignal =
-    latinCount + englishWordCount * 1.5 + (latinCount > 0 || chineseCount === 0 ? digitCount * 1.25 : digitCount * 0.15);
-
-  if (japaneseCount > 0) {
-    return "ja-JP";
-  }
-  if (koreanCount > 0) {
-    return "ko-KR";
-  }
-  if (cyrillicCount > 0) {
-    return "ru-RU";
-  }
-  if (
-    englishSignal > 0 &&
-    (chineseCount === 0 ||
-      englishSignal >= chineseCount * 1.35 ||
-      (latinCount >= 2 && digitCount >= 2 && englishSignal >= chineseCount * 0.9))
-  ) {
-    return /en-GB/i.test(navigator.language || "") ? "en-GB" : "en-US";
-  }
-  if (chineseCount > 0) {
-    return /zh-(TW|HK|MO)/i.test(navigator.language || "") ? "zh-TW" : "zh-CN";
-  }
-  if (latinCount > 0 || digitCount > 0) {
-    return /en-GB/i.test(navigator.language || "") ? "en-GB" : "en-US";
-  }
-  return navigator.language || "zh-CN";
-};
 
 isSpeechActive = function () {
   const browserSpeaking = "speechSynthesis" in window && (window.speechSynthesis.speaking || window.speechSynthesis.paused);
@@ -4732,6 +4221,7 @@ runVoiceSelfTest = async function () {
 startSpeech = async function () {
   window.clearTimeout(state.speechRestartTimer);
   window.clearTimeout(state.rateRestartTimer);
+  state.awaitingMoreSections = false;
   if (!state.book) {
     setStatus("请先导入书籍");
     renderSpeechDiagnostics("还没有书", "请先导入一本书，再开始听读。", "warning");
@@ -4744,6 +4234,10 @@ startSpeech = async function () {
     renderSpeechDiagnostics("当前章节无法朗读", "这一章没有拆出可读句子。", "warning");
     return;
   }
+
+  // Unlock the media anchor while still inside the user gesture — waiting for
+  // voices below can outlast the gesture window on iOS/Android autoplay rules.
+  startMediaAnchor();
 
   if (state.paused && state.activeAudio) {
     await state.activeAudio.play();
@@ -4808,8 +4302,15 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
 
     state.speaking = false;
     state.paused = false;
-    dom.speechStateHint.textContent = "全书朗读结束";
-    renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
+    if (state.backgroundImportBookId && state.backgroundImportBookId === state.bookId) {
+      // Listening outran the background parser; resume when chapters append.
+      state.awaitingMoreSections = true;
+      dom.speechStateHint.textContent = "已读到最新解析进度，后续章节解析完会自动续读";
+      renderSpeechDiagnostics("等待后续章节", "已读完当前解析出的内容；后台解析出新章节后会自动继续朗读。", "success");
+    } else {
+      dom.speechStateHint.textContent = "全书朗读结束";
+      renderSpeechDiagnostics("全书朗读完成", "已经顺着整本书读到了末尾。", "success");
+    }
     updateSpeechProgress();
     onSpeechPlaybackStopped();
     return false;
@@ -4894,6 +4395,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     state.speaking = false;
     state.paused = false;
     dom.speechStateHint.textContent = "语音朗读中断，请重新开始";
+    // Release the wake lock, keep-alive timer and media anchor — this is a
+    // terminal stop, not a retry.
+    onSpeechPlaybackStopped();
     const details = describeSpeechError(event?.error || event?.type || "");
     renderSpeechDiagnostics("朗读失败", `${details.title}。${details.message}`, details.state || "error");
   };
@@ -5020,6 +4524,7 @@ togglePause = async function () {
 
 stopSpeech = function (options = {}) {
   state.speechAttemptNonce += 1;
+  state.awaitingMoreSections = false;
   state.utteranceRefs = [];
   window.clearTimeout(state.rateRestartTimer);
   window.clearTimeout(state.speechRestartTimer);
@@ -5061,6 +4566,7 @@ refreshVoiceHint = function () {
 };
 
 function loadDemoBook(options = {}) {
+  beginBookLoad();
   const demoSections = splitPlainTextIntoSections(demoBookText, "aurora-demo.txt");
   finalizeBook({
     title: "Aurora Demo",

@@ -8,11 +8,15 @@
 // rendering and the JS pixel loop — off the main thread.
 //
 // Protocol (main ↔ worker):
-//   load    { id, buffer<ArrayBuffer, transferred> }  →  loaded { id }
+//   load    { id, file<File> }  (or legacy buffer<ArrayBuffer, transferred>)
+//                                                     →  loaded { id }
 //   render  { id, pageNumber, mobile }                →  rendered { id, blob }
 //   rebitmap{ id }  (PSM retry, same page)            →  rendered { id, blob }
 //   release { id }                                    →  released { id }
 //   any failure                                       →  error { id, message }
+//
+// The File handle is preferred: structured-cloning it is practically free
+// (disk-backed), so the main thread never duplicates a huge scanned PDF.
 
 import * as pdfjsLib from "./vendor/pdf.min.mjs";
 
@@ -38,7 +42,7 @@ self.onmessage = async (event) => {
   const { type, id } = message;
   try {
     if (type === "load") {
-      await loadDocument(message.buffer);
+      await loadDocument(message.file || message.buffer);
       self.postMessage({ type: "loaded", id });
     } else if (type === "render") {
       const canvas = await renderAndPrepare(message.pageNumber, Boolean(message.mobile));
@@ -65,12 +69,14 @@ self.onmessage = async (event) => {
   }
 };
 
-async function loadDocument(buffer) {
+async function loadDocument(source) {
   await releaseDocument();
-  if (!buffer) {
-    throw new Error("ocr-worker: missing buffer");
+  if (!source) {
+    throw new Error("ocr-worker: missing source");
   }
-  const loadingTask = pdfjsLib.getDocument({ data: buffer });
+  // File/Blob: read the bytes here in the worker; ArrayBuffer: legacy path.
+  const data = typeof source.arrayBuffer === "function" ? await source.arrayBuffer() : source;
+  const loadingTask = pdfjsLib.getDocument({ data });
   pdfDoc = await loadingTask.promise;
 }
 

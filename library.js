@@ -1,6 +1,7 @@
 const DB_NAME = "istone-reader-library";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_BOOKS = "books";
+const STORE_OCR_PAGES = "ocrPages";
 
 let dbPromise = null;
 
@@ -23,6 +24,10 @@ function openLibraryDb() {
         const store = db.createObjectStore(STORE_BOOKS, { keyPath: "id" });
         store.createIndex("lastOpenedAt", "lastOpenedAt");
       }
+      if (!db.objectStoreNames.contains(STORE_OCR_PAGES)) {
+        const store = db.createObjectStore(STORE_OCR_PAGES, { keyPath: "key" });
+        store.createIndex("updatedAt", "updatedAt");
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => {
@@ -33,12 +38,12 @@ function openLibraryDb() {
   return dbPromise;
 }
 
-function runTransaction(mode, executor) {
+function runTransaction(mode, executor, storeName = STORE_BOOKS) {
   return openLibraryDb().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const transaction = db.transaction(STORE_BOOKS, mode);
-        const store = transaction.objectStore(STORE_BOOKS);
+        const transaction = db.transaction(storeName, mode);
+        const store = transaction.objectStore(storeName);
         let result;
         try {
           result = executor(store);
@@ -114,4 +119,57 @@ export async function updateLibraryProgress(id, progress) {
   record.progress = progress;
   record.lastOpenedAt = Date.now();
   await runTransaction("readwrite", (store) => store.put(record));
+}
+
+// --- Per-page OCR result cache ---
+// Recognized text is stored per (file fingerprint, page, OCR language), so an
+// interrupted import of a big scanned PDF can resume without redoing pages.
+
+function ocrPageKey(fileKey, pageNumber, lang) {
+  return `${fileKey}::${lang}::${pageNumber}`;
+}
+
+export async function getCachedOcrPage(fileKey, pageNumber, lang) {
+  if (!fileKey || !pageNumber || !lang) {
+    return null;
+  }
+  return runTransaction("readonly", (store) => store.get(ocrPageKey(fileKey, pageNumber, lang)), STORE_OCR_PAGES);
+}
+
+export async function saveCachedOcrPage({ fileKey, pageNumber, lang, text }) {
+  if (!fileKey || !pageNumber || !lang || typeof text !== "string") {
+    return;
+  }
+  const record = {
+    key: ocrPageKey(fileKey, pageNumber, lang),
+    fileKey,
+    pageNumber,
+    lang,
+    text,
+    updatedAt: Date.now(),
+  };
+  await runTransaction("readwrite", (store) => store.put(record), STORE_OCR_PAGES);
+}
+
+export async function pruneOcrPageCache(maxAgeMs) {
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs <= 0) {
+    return;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  await runTransaction(
+    "readwrite",
+    (store) => {
+      const range = IDBKeyRange.upperBound(cutoff);
+      const request = store.index("updatedAt").openCursor(range);
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (cursor) {
+          cursor.delete();
+          cursor.continue();
+        }
+      };
+      return request;
+    },
+    STORE_OCR_PAGES,
+  );
 }

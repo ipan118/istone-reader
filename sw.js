@@ -1,12 +1,15 @@
-const CACHE_NAME = "istone-reader-pwa-v24";
+const CACHE_NAME = "istone-reader-pwa-v26";
 const SHARED_BOOK_URL = new URL("./shared-book", self.registration.scope).toString();
 const SHARE_TARGET_PATH = new URL("./share-target", self.registration.scope).pathname;
+const API_PATH_PREFIX = new URL("./api/", self.registration.scope).pathname;
 const CORE_ASSETS = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
   "./library.js",
+  "./text-pipeline.mjs",
+  "./ocr-render-worker.js",
   "./manifest.webmanifest",
   "./assets/icon.svg",
   "./assets/icon-180.png",
@@ -19,12 +22,33 @@ const CORE_ASSETS = [
   "./vendor/tesseract/tesseract.min.js",
   "./vendor/tesseract/worker.min.js",
 ];
+// Large OCR runtime pack (~12 MB): Tesseract cores + language models. Cached
+// best-effort at install so scanned-PDF recognition works offline from the
+// first launch, without letting a failed download abort the core precache.
+const OCR_PACK_ASSETS = [
+  "./vendor/tesseract/tesseract-core-simd-lstm.wasm.js",
+  "./vendor/tesseract/tesseract-core-lstm.wasm.js",
+  "./vendor/tessdata/chi_sim.traineddata.gz",
+  "./vendor/tessdata/eng.traineddata.gz",
+];
+// App-shell files that must follow each deploy immediately. Resolved against
+// the registration scope so the list keeps working when the app is hosted
+// under a sub-path (e.g. GitHub Pages project sites).
+const LIVE_ASSET_URLS = new Set(
+  ["./", "./index.html", "./app.js", "./library.js", "./text-pipeline.mjs", "./ocr-render-worker.js", "./styles.css", "./manifest.webmanifest", "./sw.js"].map(
+    (path) => new URL(path, self.registration.scope).toString(),
+  ),
+);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(CORE_ASSETS))
+      .then((cache) =>
+        cache
+          .addAll(CORE_ASSETS)
+          .then(() => Promise.allSettled(OCR_PACK_ASSETS.map((asset) => cache.add(asset)))),
+      )
       .then(() => self.skipWaiting())
       .catch(() => Promise.resolve()),
   );
@@ -58,7 +82,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  if (url.pathname.startsWith("/api/")) {
+  if (url.origin === self.location.origin && url.pathname.startsWith(API_PATH_PREFIX)) {
     event.respondWith(fetch(event.request));
     return;
   }
@@ -68,8 +92,7 @@ self.addEventListener("fetch", (event) => {
   }
   const isLiveAsset =
     url.origin === self.location.origin &&
-    (event.request.mode === "navigate" ||
-      ["/", "/index.html", "/app.js", "/library.js", "/styles.css", "/manifest.webmanifest", "/sw.js"].includes(url.pathname));
+    (event.request.mode === "navigate" || LIVE_ASSET_URLS.has(url.origin + url.pathname));
 
   if (isLiveAsset) {
     // Force revalidation with the server: some mobile browsers (and the
