@@ -187,6 +187,7 @@ export function repairOcrLineBreaks(text) {
       .replace(/[|｜]{2,}/g, " ")
       .replace(/\b([A-Za-z])\s+([,.;:!?])\b/g, "$1$2")
       .replace(/\n\s*(?:第\s*)?\d{1,4}\s*(?:页|page)?\s*\n/gi, "\n")
+      .replace(INTRA_CJK_SPACE_RE, "")
       .replace(/\n{3,}/g, "\n\n"),
   )
     .replace(/([A-Za-z])-\s*\n\s*([A-Za-z])/g, "$1$2")
@@ -297,6 +298,26 @@ export function detectHeadingFromPage(text) {
   );
 }
 
+// PDF text layers and OCR output often inject a space between every CJK
+// glyph ("持 续 买 入"), which breaks read-aloud pacing, heading detection and
+// display. Spaces flanked by CJK characters/punctuation carry no meaning and
+// are removed; spaces at CJK↔Latin boundaries are kept.
+const CJK_SPACE_CONTEXT =
+  "[\\u4e00-\\u9fa5\\u3040-\\u30ff\\u3001-\\u303f\\uff00-\\uffef\\u201c\\u201d\\u2018\\u2019\\u2026\\u2014\\u00b7]";
+export const INTRA_CJK_SPACE_RE = new RegExp(`(?<=${CJK_SPACE_CONTEXT})[ \\t]+(?=${CJK_SPACE_CONTEXT})`, "g");
+
+// Joins the text items of one PDF line: CJK runs join tightly, Latin/digit
+// runs keep a separating space (the old unconditional " " join was the source
+// of per-character spaces in Chinese PDFs).
+function joinPdfLineItems(parts) {
+  return parts.reduce((joined, part) => {
+    if (!joined) {
+      return part;
+    }
+    return joined + (shouldInsertSpaceBetween(joined, part) ? " " : "") + part;
+  }, "");
+}
+
 export function pdfTextItemsToString(items) {
   const normalizedItems = items
     .map((item) => ({
@@ -324,13 +345,13 @@ export function pdfTextItemsToString(items) {
       return;
     }
 
-    lines.push(line.join(" "));
+    lines.push(joinPdfLineItems(line));
     line = [item.text];
     currentY = item.y;
   });
 
   if (line.length) {
-    lines.push(line.join(" "));
+    lines.push(joinPdfLineItems(line));
   }
 
   return lines.join("\n");
@@ -665,10 +686,11 @@ export function countMeaningfulCharacters(text) {
 
 export function normalizeReadableText(text) {
   return normalizeLineBreaks(text)
-    .replace(/\u00a0/g, " ")
+    .replace(/[\u00a0\u3000]/g, " ")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
+    .replace(INTRA_CJK_SPACE_RE, "")
     .trim();
 }
 
