@@ -1108,7 +1108,10 @@ input[type="range"]::-moz-range-thumb {
   }
 }
 
-@media (min-width: 920px) {
+/* Desktop multi-column layouts require a fine pointer: phones forced into
+   "desktop site" mode ignore the viewport meta and lay out at ~980px, but
+   their pointer stays coarse — they must keep the single-column layout. */
+@media (min-width: 920px) and (pointer: fine) {
   .control-grid {
     grid-template-columns: repeat(12, minmax(0, 1fr));
     align-items: start;
@@ -1131,7 +1134,7 @@ input[type="range"]::-moz-range-thumb {
   }
 }
 
-@media (max-width: 919px) {
+@media (max-width: 919px), (pointer: coarse) {
   .app-shell {
     width: min(100%, calc(100% - 18px));
     padding-top: max(14px, env(safe-area-inset-top));
@@ -1442,7 +1445,7 @@ select,
   max-width: 420px;
 }
 
-@media (min-width: 1080px) {
+@media (min-width: 1080px) and (pointer: fine) {
   .control-grid {
     grid-template-columns: 0.95fr 1.15fr;
   }
@@ -1458,7 +1461,7 @@ select,
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 900px), (pointer: coarse) {
   .app-shell {
     width: min(100%, calc(100% - 16px));
     gap: 10px;

@@ -10,6 +10,7 @@ import {
   splitIntoParagraphs,
   splitPlainTextIntoSections,
   splitPdfPagesIntoSections,
+  pdfTextItemsToString,
   repairOcrLineBreaks,
   removeRepeatedOcrLines,
   cleanDisplayText,
@@ -145,6 +146,54 @@ test("cleanDisplayText: strips bracketed citations and superscripts", () => {
     cleanDisplayText("研究表明[12]，全球气温上升趋势明显（3），详见附录¹。"),
     "研究表明，全球气温上升趋势明显，详见附录。",
   );
+});
+
+test("cleanDisplayText: removes spaces injected between CJK characters", () => {
+  // PDF text layers / OCR often space out every glyph: 持 续 买 入.
+  assert.equal(
+    cleanDisplayText("持 续 买 入 ，基 于 百 年 金 融 数 据 。"),
+    "持续买入，基于百年金融数据。",
+  );
+  // CJK↔Latin boundaries keep their space; CJK↔CJK loses it.
+  assert.equal(cleanDisplayText("使用 Windows 声线 朗读 效果"), "使用 Windows 声线朗读效果");
+  // Full-width ideographic spaces are treated as spaces and collapsed too.
+  assert.equal(cleanDisplayText("第一章　总则　与　范围"), "第一章总则与范围");
+});
+
+test("pdfTextItemsToString: CJK items join tightly, Latin items keep spaces", () => {
+  const item = (str, x) => ({ str, transform: [1, 0, 0, 1, x, 700] });
+  assert.equal(
+    pdfTextItemsToString([item("第", 10), item("一", 24), item("章", 38), item("星辰", 52)]),
+    "第一章星辰",
+  );
+  assert.equal(
+    pdfTextItemsToString([item("The", 10), item("quick", 42), item("fox", 96)]),
+    "The quick fox",
+  );
+});
+
+test("splitPdfPagesIntoSections: per-glyph-spaced heading pages still split", () => {
+  const heading = pdfTextItemsToString([
+    { str: "第", transform: [1, 0, 0, 1, 10, 800] },
+    { str: "二", transform: [1, 0, 0, 1, 24, 800] },
+    { str: "章", transform: [1, 0, 0, 1, 38, 800] },
+    { str: "风暴", transform: [1, 0, 0, 1, 52, 800] },
+  ]);
+  const pages = [
+    {
+      pageNumber: 1,
+      text: "开篇的正文内容足够长，讲述了远航前的准备工作，水手们把缆绳一圈圈收好，等待起航的号角在清晨响起。",
+      ocrUsed: false,
+    },
+    {
+      pageNumber: 2,
+      text: `${heading}\n风暴在第三天夜里毫无预兆地压了过来，船身在浪谷之间剧烈摇晃，所有人都被叫上了甲板固定货物。`,
+      ocrUsed: false,
+    },
+  ];
+  const sections = splitPdfPagesIntoSections(pages, "storm.pdf");
+  assert.equal(sections.length, 2);
+  assert.equal(sections[1].title, "第二章风暴");
 });
 
 test("sanitizeTextForSpeech: brackets and dashes become natural pauses", () => {
