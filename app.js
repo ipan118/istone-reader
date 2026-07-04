@@ -254,6 +254,12 @@ const state = {
   // learned from real onstart→onend durations so highlight tracks voices that
   // never emit boundary events (common for Chinese voices).
   speechMsPerCharEwma: 0,
+  // In-flight speech unit tracking, so a restart (rate/voice change) can
+  // estimate how far the voice actually got even when it never fired a single
+  // boundary event.
+  activeUnitStartedAt: 0,
+  activeUnitBoundaries: null,
+  activeUnitMsPerChar: 0,
 };
 
 const dom = {
@@ -500,12 +506,25 @@ function wireEvents() {
   });
 
   dom.rateRange?.addEventListener("input", () => {
+    const previousRate = state.rate;
     state.rate = clamp(Number(dom.rateRange.value), 0.5, 3.0);
-    // Rate changed: the calibrated ms/char is now stale, let it re-learn.
-    state.speechMsPerCharEwma = 0;
+    // The learned ms/char was measured at the old rate; rescale it so the
+    // read-along estimate stays calibrated instead of relearning from zero.
+    if (state.speechMsPerCharEwma > 0 && state.rate > 0) {
+      state.speechMsPerCharEwma *= previousRate / state.rate;
+    }
     dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
-    applyRateChangeDuringPlayback();
+    if (state.activeAudio) {
+      // Bridge audio changes speed live, no restart needed.
+      state.activeAudio.playbackRate = clamp(state.rate, 0.5, 3.0);
+    }
     saveSettings();
+  });
+  // Browser speech cannot change rate mid-utterance, so a restart is needed —
+  // but only once the drag ends. Restarting on every input event cancelled
+  // playback dozens of times per adjustment on mobile.
+  dom.rateRange?.addEventListener("change", () => {
+    applyRateChangeDuringPlayback();
   });
 
   dom.prevSentenceButton?.addEventListener("click", () => {
@@ -747,7 +766,27 @@ function requestSpeechRestart(message, delayMs = SPEECH_RESTART_DEBOUNCE_MS) {
     return;
   }
 
-  const sentenceIndex = clamp(state.currentSentenceIndex, 0, Math.max(0, sentences.length - 1));
+  const maxIndex = Math.max(0, sentences.length - 1);
+  let sentenceIndex = clamp(state.currentSentenceIndex, 0, maxIndex);
+  // Many voices (notably Chinese ones on Android) never fire boundary events,
+  // so currentSentenceIndex may still point at the start of the in-flight
+  // unit. Estimate real progress from elapsed time so the restart resumes at
+  // the sentence being read instead of replaying the whole unit.
+  if (state.activeUnitStartedAt && state.activeUnitMsPerChar > 0 && Array.isArray(state.activeUnitBoundaries)) {
+    const progressedChars = (Date.now() - state.activeUnitStartedAt) / state.activeUnitMsPerChar;
+    let estimated = sentenceIndex;
+    state.activeUnitBoundaries.forEach((boundary) => {
+      if (progressedChars >= boundary.start) {
+        estimated = boundary.sentenceIndex;
+      }
+    });
+    sentenceIndex = clamp(Math.max(sentenceIndex, estimated), 0, maxIndex);
+  }
+  // Adopt the refined position and drop the (now cancelled) unit snapshot so
+  // a follow-up restart before the new utterance starts chains from here.
+  state.currentSentenceIndex = sentenceIndex;
+  state.activeUnitStartedAt = 0;
+  state.activeUnitBoundaries = null;
   state.speechAttemptNonce += 1;
   state.speaking = true;
   state.paused = false;
@@ -4344,6 +4383,12 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
     }
     unitStartedAt = Date.now();
     state.currentSentenceIndex = sentenceIndex;
+    // Snapshot unit timing for the restart-position estimate. The per-char
+    // speed is captured now because it reflects the rate this utterance was
+    // actually queued with.
+    state.activeUnitStartedAt = unitStartedAt;
+    state.activeUnitBoundaries = slicedUnit?.boundaries || null;
+    state.activeUnitMsPerChar = estimateSpeechMsPerChar(slicedUnit?.text || sentences[sentenceIndex] || "");
     dom.speechStateHint.textContent = `正在朗读：${snippet}${sentences[sentenceIndex].length > 28 ? "..." : ""}`;
     highlightSentence(state.currentSentenceIndex);
     updateSpeechProgress();
@@ -4354,6 +4399,8 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   };
   const advanceAfterEnd = () => {
     clearBoundaryFallbackTimers();
+    state.activeUnitStartedAt = 0;
+    state.activeUnitBoundaries = null;
     state.currentSentenceIndex = nextSentenceIndex + 1;
     updateSpeechProgress();
   };
@@ -4525,6 +4572,8 @@ togglePause = async function () {
 stopSpeech = function (options = {}) {
   state.speechAttemptNonce += 1;
   state.awaitingMoreSections = false;
+  state.activeUnitStartedAt = 0;
+  state.activeUnitBoundaries = null;
   state.utteranceRefs = [];
   window.clearTimeout(state.rateRestartTimer);
   window.clearTimeout(state.speechRestartTimer);
