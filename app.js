@@ -37,6 +37,9 @@ import {
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
+// Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
+// hero badge so a phone screenshot immediately reveals which build is live.
+const APP_VERSION = "v26";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -442,7 +445,7 @@ function applyBrandCopy() {
   const toneCaption = document.querySelector(".studio-block .block-heading span");
 
   if (brandBadge) {
-    brandBadge.textContent = "iStone Reader";
+    brandBadge.textContent = `iStone Reader ${APP_VERSION}`;
   }
   if (eyebrow) {
     eyebrow.textContent = "简单方便的听读体验";
