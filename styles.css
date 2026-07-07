@@ -376,6 +376,96 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* --- Sticky mini player --- */
+/* Playback controls stay reachable while reading anywhere on the page. */
+body.has-mini-player {
+  padding-bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+}
+
+.mini-player {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  width: min(680px, calc(100% - 20px));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 20px;
+  background: var(--panel-top);
+  border: 1px solid var(--surface-strong);
+  box-shadow: 0 12px 32px rgba(6, 16, 32, 0.28);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 60;
+}
+
+.mini-button {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  border: 1px solid var(--surface-strong);
+  background: var(--surface-muted);
+  color: var(--text-main);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mini-button.mini-play {
+  background: var(--accent-primary);
+  border-color: transparent;
+  color: #fff;
+  font-size: 20px;
+}
+
+.mini-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text-main);
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.mini-info strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-info span {
+  font-size: 12px;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- New-version toast --- */
+.update-toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(104px + env(safe-area-inset-bottom, 0px));
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid var(--surface-strong);
+  background: var(--accent-primary);
+  color: #fff;
+  font-size: 13px;
+  box-shadow: 0 10px 26px rgba(6, 16, 32, 0.3);
+  cursor: pointer;
+  z-index: 70;
+}
+
 .support-row {
   flex-wrap: wrap;
   gap: 10px;
