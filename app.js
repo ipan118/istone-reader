@@ -37,6 +37,9 @@ import {
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
+// Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
+// hero badge so a phone screenshot immediately reveals which build is live.
+const APP_VERSION = "v27";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -326,6 +329,14 @@ const dom = {
   wechatDialogClose: document.getElementById("wechat-dialog-close"),
   wechatStepsAndroid: document.getElementById("wechat-steps-android"),
   wechatStepsIos: document.getElementById("wechat-steps-ios"),
+  miniPlayer: document.getElementById("mini-player"),
+  miniPlay: document.getElementById("mini-play"),
+  miniPrev: document.getElementById("mini-prev"),
+  miniNext: document.getElementById("mini-next"),
+  miniInfo: document.getElementById("mini-info"),
+  miniTitle: document.getElementById("mini-title"),
+  miniProgress: document.getElementById("mini-progress"),
+  updateToast: document.getElementById("update-toast"),
 };
 
 // Identifies the most recent book load; a background PDF import aborts as soon
@@ -362,6 +373,15 @@ async function bootstrap() {
     };
   }
   if ("serviceWorker" in navigator) {
+    // If a controller already exists, a later controllerchange means a new
+    // build took over mid-session — offer a one-tap refresh. (On first
+    // install there is no previous controller and no toast.)
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadController && dom.updateToast) {
+        dom.updateToast.hidden = false;
+      }
+    });
     navigator.serviceWorker
       .register("./sw.js")
       .then((registration) => registration.update().catch(() => Promise.resolve()))
@@ -442,7 +462,7 @@ function applyBrandCopy() {
   const toneCaption = document.querySelector(".studio-block .block-heading span");
 
   if (brandBadge) {
-    brandBadge.textContent = "iStone Reader";
+    brandBadge.textContent = `iStone Reader ${APP_VERSION}`;
   }
   if (eyebrow) {
     eyebrow.textContent = "简单方便的听读体验";
@@ -554,6 +574,27 @@ function wireEvents() {
     state.fontScale = clamp(Number(dom.fontSizeRange.value), 85, 140);
     applyFontScale();
     saveSettings();
+  });
+
+  dom.miniPlay?.addEventListener("click", () => {
+    if (state.speaking && !state.paused) {
+      void togglePause();
+    } else {
+      void startSpeech();
+    }
+  });
+  dom.miniPrev?.addEventListener("click", () => {
+    stepSentence(-1);
+  });
+  dom.miniNext?.addEventListener("click", () => {
+    stepSentence(1);
+  });
+  dom.miniInfo?.addEventListener("click", () => {
+    const target = state.activeSentenceEl || state.sentenceElByIndex.get(state.currentSentenceIndex) || dom.readerBody;
+    target?.scrollIntoView({ behavior: "smooth", block: "center" });
+  });
+  dom.updateToast?.addEventListener("click", () => {
+    window.location.reload();
   });
 
   dom.speakButton.addEventListener("click", () => {
@@ -2320,6 +2361,37 @@ function updateSpeechProgress() {
   if (dom.speechProgressText) {
     dom.speechProgressText.textContent = `${Math.round(percent)}%`;
   }
+  refreshMiniPlayer();
+}
+
+// Sticky mini player: keeps play/pause and sentence stepping reachable while
+// the page is scrolled anywhere (the main controls sit far up on phones).
+function refreshMiniPlayer() {
+  if (!dom.miniPlayer) {
+    return;
+  }
+  if (!state.book) {
+    dom.miniPlayer.hidden = true;
+    document.body.classList.remove("has-mini-player");
+    return;
+  }
+  dom.miniPlayer.hidden = false;
+  document.body.classList.add("has-mini-player");
+  if (dom.miniPlay) {
+    const playing = state.speaking && !state.paused;
+    dom.miniPlay.textContent = playing ? "⏸" : "▶";
+    dom.miniPlay.setAttribute("aria-label", playing ? "暂停" : "播放");
+  }
+  const section = getCurrentSection();
+  if (dom.miniTitle) {
+    dom.miniTitle.textContent = section?.title || state.book.title || "未开始朗读";
+  }
+  if (dom.miniProgress) {
+    const sectionCount = state.book.sections.length;
+    const sentenceTotal = state.renderedSentenceCount || 0;
+    const sentencePart = sentenceTotal ? ` · 句 ${Math.min(state.currentSentenceIndex + 1, sentenceTotal)}/${sentenceTotal}` : "";
+    dom.miniProgress.textContent = `第 ${state.currentSectionIndex + 1}/${sectionCount} 章${sentencePart}`;
+  }
 }
 
 function jumpToParagraph(index) {
@@ -2765,6 +2837,7 @@ function onSpeechPlaybackStarted() {
   startMediaAnchor();
   updateMediaSessionMetadata();
   setMediaSessionPlaybackState("playing");
+  refreshMiniPlayer();
 }
 
 function onSpeechPlaybackStopped(options = {}) {
@@ -2774,6 +2847,7 @@ function onSpeechPlaybackStopped(options = {}) {
   stopMediaAnchor();
   setMediaSessionPlaybackState(options.paused ? "paused" : "none");
   void persistProgressNow();
+  refreshMiniPlayer();
 }
 
 function setMediaSessionPlaybackState(playbackState) {
