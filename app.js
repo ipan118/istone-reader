@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v27";
+const APP_VERSION = "v28";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -539,6 +539,8 @@ function wireEvents() {
       state.activeAudio.playbackRate = clamp(state.rate, 0.5, 3.0);
     }
     saveSettings();
+    // Remember the speed for this book (metadata-only debounced write).
+    schedulePersistProgress();
   });
   // Browser speech cannot change rate mid-utterance, so a restart is needed —
   // but only once the drag ends. Restarting on every input event cancelled
@@ -1986,6 +1988,12 @@ function finalizeBook(bookData, options = {}) {
   renderChapterChips();
 
   const progress = options.progress || null;
+  if (Number.isFinite(progress?.rate) && progress.rate > 0) {
+    // Each book remembers its own listening speed.
+    state.rate = clamp(progress.rate, 0.5, 3.0);
+    state.speechMsPerCharEwma = 0;
+    refreshSpeechControls();
+  }
   const startSectionIndex = clamp(progress?.sectionIndex ?? 0, 0, sanitizedSections.length - 1);
   setCurrentSection(startSectionIndex, { stopSpeaking: true, resetParagraph: true, resetSentence: true });
   if (progress && Number.isFinite(progress.sentenceIndex) && progress.sentenceIndex > 0) {
@@ -2013,6 +2021,8 @@ function currentReadingProgress() {
     sectionIndex: state.currentSectionIndex,
     paragraphIndex: state.currentParagraphIndex,
     sentenceIndex: state.currentSentenceIndex,
+    // Per-book speed memory: restored when the book is reopened.
+    rate: state.rate,
     updatedAt: Date.now(),
   };
 }
