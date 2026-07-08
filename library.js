@@ -1,6 +1,10 @@
 const DB_NAME = "istone-reader-library";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+// v3 splits book storage: "books" holds lightweight metadata (title, format,
+// progress, …) while "bookContents" holds the full section text. The shelf
+// list and the frequent progress writes no longer touch the heavy text blobs.
 const STORE_BOOKS = "books";
+const STORE_BOOK_CONTENTS = "bookContents";
 const STORE_OCR_PAGES = "ocrPages";
 
 let dbPromise = null;
@@ -18,7 +22,7 @@ function openLibraryDb() {
   }
   dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_BOOKS)) {
         const store = db.createObjectStore(STORE_BOOKS, { keyPath: "id" });
@@ -28,6 +32,29 @@ function openLibraryDb() {
         const store = db.createObjectStore(STORE_OCR_PAGES, { keyPath: "key" });
         store.createIndex("updatedAt", "updatedAt");
       }
+      if (!db.objectStoreNames.contains(STORE_BOOK_CONTENTS)) {
+        db.createObjectStore(STORE_BOOK_CONTENTS, { keyPath: "id" });
+      }
+      if (event.oldVersion > 0 && event.oldVersion < 3) {
+        // v1/v2 stored the full section text inline in each book record;
+        // move it into bookContents and keep only metadata behind.
+        const books = request.transaction.objectStore(STORE_BOOKS);
+        const contents = request.transaction.objectStore(STORE_BOOK_CONTENTS);
+        books.openCursor().onsuccess = (cursorEvent) => {
+          const cursor = cursorEvent.target.result;
+          if (!cursor) {
+            return;
+          }
+          const record = cursor.value;
+          if (Array.isArray(record.sections)) {
+            contents.put({ id: record.id, sections: record.sections });
+            record.sectionCount = record.sections.length;
+            delete record.sections;
+            cursor.update(record);
+          }
+          cursor.continue();
+        };
+      }
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => {
@@ -36,6 +63,28 @@ function openLibraryDb() {
     };
   });
   return dbPromise;
+}
+
+// Runs `executor(transaction)` over one or more stores. The executor may
+// return a function, which is invoked at transaction completion (after all
+// requests settled) to produce the resolved value.
+function runStoresTransaction(mode, storeNames, executor) {
+  return openLibraryDb().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        const transaction = db.transaction(storeNames, mode);
+        let result;
+        try {
+          result = executor(transaction);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        transaction.oncomplete = () => resolve(typeof result === "function" ? result() : result);
+        transaction.onerror = () => reject(transaction.error || new Error("indexeddb-transaction-failed"));
+        transaction.onabort = () => reject(transaction.error || new Error("indexeddb-transaction-aborted"));
+      }),
+  );
 }
 
 function runTransaction(mode, executor, storeName = STORE_BOOKS) {
@@ -68,31 +117,56 @@ export async function saveBookToLibrary(record) {
   if (!record?.id) {
     return;
   }
-  const existing = await getLibraryBook(record.id).catch(() => null);
-  const payload = {
-    ...record,
-    addedAt: existing?.addedAt || record.addedAt || Date.now(),
-    lastOpenedAt: Date.now(),
-    progress: record.progress || existing?.progress || null,
-  };
-  await runTransaction("readwrite", (store) => store.put(payload));
+  const { sections, ...metaFields } = record;
+  await runStoresTransaction("readwrite", [STORE_BOOKS, STORE_BOOK_CONTENTS], (transaction) => {
+    const books = transaction.objectStore(STORE_BOOKS);
+    const getRequest = books.get(record.id);
+    getRequest.onsuccess = () => {
+      const existing = getRequest.result || null;
+      const meta = {
+        ...metaFields,
+        sectionCount: Array.isArray(sections) ? sections.length : existing?.sectionCount || 0,
+        addedAt: existing?.addedAt || record.addedAt || Date.now(),
+        lastOpenedAt: Date.now(),
+        progress: record.progress || existing?.progress || null,
+      };
+      books.put(meta);
+    };
+    if (Array.isArray(sections)) {
+      transaction.objectStore(STORE_BOOK_CONTENTS).put({ id: record.id, sections });
+    }
+  });
 }
 
 export async function getLibraryBook(id) {
   if (!id) {
     return null;
   }
-  return runTransaction("readonly", (store) => store.get(id));
+  return runStoresTransaction("readonly", [STORE_BOOKS, STORE_BOOK_CONTENTS], (transaction) => {
+    const metaRequest = transaction.objectStore(STORE_BOOKS).get(id);
+    const contentRequest = transaction.objectStore(STORE_BOOK_CONTENTS).get(id);
+    return () => {
+      const meta = metaRequest.result;
+      if (!meta) {
+        return null;
+      }
+      return { ...meta, sections: contentRequest.result?.sections || meta.sections || [] };
+    };
+  });
 }
 
 export async function listLibraryBooks() {
-  const records = await runTransaction("readonly", (store) => store.getAll());
-  return (records || [])
+  // Metadata only — the shelf list never loads the heavy section text.
+  const records = await runStoresTransaction("readonly", [STORE_BOOKS], (transaction) => {
+    const request = transaction.objectStore(STORE_BOOKS).getAll();
+    return () => request.result || [];
+  });
+  return records
     .map((record) => ({
       id: record.id,
       title: record.title,
       format: record.format,
-      sectionCount: Array.isArray(record.sections) ? record.sections.length : 0,
+      sectionCount: record.sectionCount || (Array.isArray(record.sections) ? record.sections.length : 0),
       totalCharacters: record.totalCharacters || 0,
       addedAt: record.addedAt || 0,
       lastOpenedAt: record.lastOpenedAt || 0,
@@ -105,20 +179,31 @@ export async function deleteLibraryBook(id) {
   if (!id) {
     return;
   }
-  await runTransaction("readwrite", (store) => store.delete(id));
+  await runStoresTransaction("readwrite", [STORE_BOOKS, STORE_BOOK_CONTENTS], (transaction) => {
+    transaction.objectStore(STORE_BOOKS).delete(id);
+    transaction.objectStore(STORE_BOOK_CONTENTS).delete(id);
+  });
 }
 
 export async function updateLibraryProgress(id, progress) {
   if (!id || !progress) {
     return;
   }
-  const record = await getLibraryBook(id).catch(() => null);
-  if (!record) {
-    return;
-  }
-  record.progress = progress;
-  record.lastOpenedAt = Date.now();
-  await runTransaction("readwrite", (store) => store.put(record));
+  // Metadata-only write: listening progress lands every second or so and must
+  // not rewrite the whole book text (it used to, wearing storage and battery).
+  await runStoresTransaction("readwrite", [STORE_BOOKS], (transaction) => {
+    const books = transaction.objectStore(STORE_BOOKS);
+    const getRequest = books.get(id);
+    getRequest.onsuccess = () => {
+      const meta = getRequest.result;
+      if (!meta) {
+        return;
+      }
+      meta.progress = progress;
+      meta.lastOpenedAt = Date.now();
+      books.put(meta);
+    };
+  });
 }
 
 // --- Per-page OCR result cache ---
