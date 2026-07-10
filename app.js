@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v30";
+const APP_VERSION = "v31";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -487,6 +487,12 @@ function wireEvents() {
     refreshVoiceHint();
     handleVoiceChangeDuringPlayback();
     saveSettings();
+    // Idle auto-preview: picking a voice immediately speaks a short sample, so
+    // auditioning voices needs no separate test tap. During playback the
+    // switch is applied to the current sentence above instead.
+    if (!isSpeechActive()) {
+      void runVoiceSelfTest();
+    }
   });
 
   dom.rateRange?.addEventListener("input", () => {
@@ -2477,12 +2483,15 @@ function stopSpeechKeepAlive() {
 
 let mediaAnchorUrl = "";
 
-// 4 s of 37 Hz sine at amplitude 96/32767 (≈ −51 dBFS): phone speakers cannot
-// reproduce it, but it is not digital silence, so the browser still treats the
-// element as an audible media session.
+// 12 s of 75 Hz sine at amplitude 1000/32767 (≈ −30 dBFS; ≈ −56 dB after the
+// 0.05 element volume). Chromium only surfaces the lock-screen media
+// notification for playback it deems audible AND longer than ~5 s — the
+// previous 4 s / ≈ −77 dB anchor failed both gates, so no controls appeared
+// on real devices. 75 Hz at −56 dB stays imperceptible: phone speakers cannot
+// reproduce sub-bass and it sits far below the hearing threshold there.
 function buildMediaAnchorWavBlob() {
   const sampleRate = 8000;
-  const sampleCount = sampleRate * 4;
+  const sampleCount = sampleRate * 12;
   const buffer = new ArrayBuffer(44 + sampleCount * 2);
   const view = new DataView(buffer);
   const writeAscii = (offset, text) => {
@@ -2504,7 +2513,7 @@ function buildMediaAnchorWavBlob() {
   writeAscii(36, "data");
   view.setUint32(40, sampleCount * 2, true);
   for (let index = 0; index < sampleCount; index += 1) {
-    view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 37 * index) / sampleRate) * 96), true);
+    view.setInt16(44 + index * 2, Math.round(Math.sin((2 * Math.PI * 75 * index) / sampleRate) * 1000), true);
   }
   return new Blob([buffer], { type: "audio/wav" });
 }
