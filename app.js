@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v28";
+const APP_VERSION = "v29";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -234,6 +234,8 @@ const state = {
   // speech ran out of published chapters and should resume on the next append.
   backgroundImportBookId: "",
   awaitingMoreSections: false,
+  // Live import progress: { done, total, avgPageMs } or null when idle.
+  importProgress: null,
   wakeLockSentinel: null,
   keepAliveTimer: 0,
   mediaAnchorAudio: null,
@@ -272,9 +274,7 @@ const dom = {
   voiceSelect: document.getElementById("voice-select"),
   voiceReadyPill: document.getElementById("voice-ready-pill"),
   rateRange: document.getElementById("rate-range"),
-  pitchRange: document.getElementById("pitch-range"),
   rateValue: document.getElementById("rate-value"),
-  pitchValue: document.getElementById("pitch-value"),
   bookTitle: document.getElementById("book-title"),
   bookSubtitle: document.getElementById("book-subtitle"),
   bookFormatPill: document.getElementById("book-format-pill"),
@@ -337,6 +337,9 @@ const dom = {
   miniTitle: document.getElementById("mini-title"),
   miniProgress: document.getElementById("mini-progress"),
   updateToast: document.getElementById("update-toast"),
+  importProgress: document.getElementById("import-progress"),
+  importProgressFill: document.getElementById("import-progress-fill"),
+  importProgressText: document.getElementById("import-progress-text"),
 };
 
 // Identifies the most recent book load; a background PDF import aborts as soon
@@ -1053,6 +1056,9 @@ async function importPdfBook(file, importNonce) {
   publisher.resumeProgress = (await getLibraryBook(publisher.bookId).catch(() => null))?.progress || null;
   const pendingPages = [];
   const startedAt = Date.now();
+  // Rolling window of recent page durations drives the remaining-time estimate
+  // (per-page cost shifts a lot between text pages and OCR pages).
+  const recentPageDurations = [];
   let ocrRenderLoaded = false;
   let ocrPageCount = 0;
   let cachedOcrPages = 0;
@@ -1063,6 +1069,7 @@ async function importPdfBook(file, importNonce) {
         publisher.stop();
         return;
       }
+      const pageStartedAt = Date.now();
       setStatus(
         publisher.published ? `后台解析中 ${pageNumber} / ${totalPages}` : `PDF 解析中 ${pageNumber} / ${totalPages}`,
       );
@@ -1112,6 +1119,16 @@ async function importPdfBook(file, importNonce) {
 
       pendingPages.push({ pageNumber, text, ocrUsed });
       publisher.maybePublish(pendingPages, { pageNumber, startedAt });
+
+      recentPageDurations.push(Date.now() - pageStartedAt);
+      if (recentPageDurations.length > 8) {
+        recentPageDurations.shift();
+      }
+      updateImportProgress({
+        done: pageNumber,
+        total: totalPages,
+        avgPageMs: recentPageDurations.reduce((sum, value) => sum + value, 0) / recentPageDurations.length,
+      });
     }
   } catch (error) {
     if (importNonce !== activeImportNonce) {
@@ -1128,6 +1145,7 @@ async function importPdfBook(file, importNonce) {
     setStatus(`后续页解析中断，已保留前 ${publisher.publishedPageCount} 页内容`);
     return;
   } finally {
+    updateImportProgress(null);
     // Always release the render worker's document so its memory is freed even
     // if parsing throws or the user cancels.
     void releaseOcrRenderDocument();
@@ -2400,8 +2418,52 @@ function refreshMiniPlayer() {
     const sectionCount = state.book.sections.length;
     const sentenceTotal = state.renderedSentenceCount || 0;
     const sentencePart = sentenceTotal ? ` · 句 ${Math.min(state.currentSentenceIndex + 1, sentenceTotal)}/${sentenceTotal}` : "";
-    dom.miniProgress.textContent = `第 ${state.currentSectionIndex + 1}/${sectionCount} 章${sentencePart}`;
+    const importing = state.importProgress?.total
+      ? ` · 解析 ${Math.round((state.importProgress.done / state.importProgress.total) * 100)}%`
+      : "";
+    dom.miniProgress.textContent = `第 ${state.currentSectionIndex + 1}/${sectionCount} 章${sentencePart}${importing}`;
   }
+}
+
+// Import progress: page counter + rolling ETA rendered in the book card (and
+// mirrored as a percentage in the mini player while listening).
+function updateImportProgress(info) {
+  state.importProgress = info;
+  renderImportProgress();
+  refreshMiniPlayer();
+}
+
+function renderImportProgress() {
+  if (!dom.importProgress) {
+    return;
+  }
+  const info = state.importProgress;
+  if (!info || !info.total) {
+    dom.importProgress.hidden = true;
+    return;
+  }
+  dom.importProgress.hidden = false;
+  const percent = clamp((info.done / info.total) * 100, 0, 100);
+  if (dom.importProgressFill) {
+    dom.importProgressFill.style.width = `${percent.toFixed(1)}%`;
+  }
+  if (dom.importProgressText) {
+    const remainingMs = info.avgPageMs > 0 ? Math.round(info.avgPageMs * (info.total - info.done)) : 0;
+    const eta = remainingMs >= 3000 ? ` · 剩余约 ${formatApproxDuration(remainingMs)}` : "";
+    dom.importProgressText.textContent = `解析进度 ${info.done}/${info.total} 页${eta}`;
+  }
+}
+
+function formatApproxDuration(ms) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) {
+    return `${Math.max(1, seconds)} 秒`;
+  }
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} 分钟`;
+  }
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`;
 }
 
 function jumpToParagraph(index) {
@@ -4193,9 +4255,6 @@ function clearActiveAudio() {
   }
 }
 
-function mapUiPitchToBrowserPitch(value) {
-  return mapRange(clamp(value, 0.5, 3.0), 0.5, 3.0, 0.5, 2.0);
-}
 
 function buildVoiceSelfTestText(voice) {
   const bucket = getVoiceBucket(voice?.lang);
@@ -4324,7 +4383,9 @@ runVoiceSelfTest = async function () {
   stopSpeech({ silent: true });
   await resetSpeechEngine();
   utterance.rate = clamp(state.rate, 0.5, 3.0);
-  utterance.pitch = mapUiPitchToBrowserPitch(state.pitch);
+  // Natural pitch. A leftover UI mapping used to force every voice down to
+  // 0.8, audibly deepening all speech (the pitch control was removed long ago).
+  utterance.pitch = 1;
   utterance.onstart = () => {
     renderSpeechDiagnostics(
       "浏览器已开始发声",
@@ -4572,7 +4633,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   // otherwise, silently dropping their events.
   state.utteranceRefs.push(utterance);
   utterance.rate = clamp(state.rate, 0.5, 3.0);
-  utterance.pitch = mapUiPitchToBrowserPitch(state.pitch);
+  // Natural pitch. A leftover UI mapping used to force every voice down to
+  // 0.8, audibly deepening all speech (the pitch control was removed long ago).
+  utterance.pitch = 1;
   utterance.volume = 1;
   let queuedAhead = false;
   utterance.onstart = () => {
