@@ -6,6 +6,7 @@ const MOCK = `(() => {
     onvoiceschanged:null,
     speak(u){ this._q.push(u); this.pending=true; this._pump(); },
     _pump(){ if(this._cur||!this._q.length) return; const u=this._q.shift(); this._cur=u; this.speaking=true;
+      (window.__spoken = window.__spoken || []).push({ text: u.text, voice: u.voice && u.voice.name });
       this.pending=this._q.length>0; const ms=25+(u.text||"").length*(30/(u.rate||1));
       this._t.push(setTimeout(()=>{ u.onstart&&u.onstart({charIndex:0});
         this._t.push(setTimeout(()=>{ if(this._cur!==u) return; this._cur=null; this.speaking=this._q.length>0; u.onend&&u.onend({}); this._pump(); }, ms)); },15)); },
@@ -58,6 +59,24 @@ const MOCK = `(() => {
   await page.click("#stop-button");
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "▶", null, { timeout: 5000 });
   console.log("play/pause/resume/stop icon OK");
+
+  // Idle voice auto-preview: changing the voice while stopped speaks a short
+  // sample in the chosen voice without flipping the player into playing state.
+  const spokenBefore = await page.evaluate(() => (window.__spoken || []).length);
+  await page.evaluate(() => {
+    const select = document.querySelector("#voice-select");
+    const other = [...select.options].find((option) => option.value && option.value !== select.value);
+    select.value = other.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await page.waitForFunction((n) => (window.__spoken || []).length > n, spokenBefore, { timeout: 10000 });
+  const preview = await page.evaluate(() => ({
+    last: window.__spoken[window.__spoken.length - 1],
+    icon: document.getElementById("mini-play").textContent,
+  }));
+  if (!/iStone Reader/.test(preview.last.text)) throw new Error("preview sample text: " + preview.last.text);
+  if (preview.icon !== "▶") throw new Error("preview must not flip the player into playing state");
+  console.log("voice auto-preview OK:", JSON.stringify(preview.last));
 
   // Info tap scrolls back to the active sentence.
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));

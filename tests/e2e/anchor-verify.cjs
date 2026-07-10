@@ -31,6 +31,16 @@ const targetUrl = process.env.TARGET_URL || "http://127.0.0.1:4173/";
   assert.equal(anchorState.loop, true, "anchor should loop");
   assert.ok(anchorState.volume <= 0.1, `anchor volume should be near-silent, got ${anchorState.volume}`);
 
+  // Chromium only shows the lock-screen media notification for playback that
+  // is longer than ~5 s — the anchor must clear that duration gate.
+  await page.waitForFunction(
+    () => (document.getElementById("media-anchor-audio")?.duration || 0) >= 5,
+    null,
+    { timeout: 5000 },
+  );
+  const anchorDuration = await page.evaluate(() => document.getElementById("media-anchor-audio").duration);
+  assert.ok(anchorDuration >= 5, `anchor duration must be >= 5s for media controls, got ${anchorDuration}`);
+
   // Media session should be marked as playing while the engine runs.
   // (Headless has no TTS voices, so speech itself may fail later — the anchor
   // and playbackState wiring is what we verify here.)
