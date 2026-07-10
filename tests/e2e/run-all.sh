@@ -49,6 +49,7 @@ run node "$E2E/storage-verify.cjs"
 run node "$E2E/fix-verify.cjs"
 BOUNDARY=off run node "$E2E/fix-verify.cjs"
 run node "$E2E/import-progress-verify.cjs"
+run node "$E2E/ux-verify.cjs"
 run node "$E2E/progressive-verify.cjs"
 TARGET_URL="http://127.0.0.1:$PORT_SUB/sub/reader/" run node "$E2E/sw-verify.cjs"
 
