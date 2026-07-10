@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v31";
+const APP_VERSION = "v32";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -470,12 +470,23 @@ function prepareToneControls() {
 
 function wireEvents() {
   dom.fileInput.addEventListener("change", async (event) => {
-    const [file] = event.target.files ?? [];
-    if (!file) {
+    const files = [...(event.target.files ?? [])];
+    dom.fileInput.value = "";
+    if (!files.length) {
       return;
     }
-    await importBook(file);
-    dom.fileInput.value = "";
+    if (files.length === 1) {
+      await importBook(files[0]);
+      return;
+    }
+    // Batch import: books parse sequentially (a big scanned PDF keeps its
+    // background OCR intact because the next import only starts after the
+    // previous one fully finishes) and all land on the shelf.
+    for (let index = 0; index < files.length; index += 1) {
+      setStatus(`批量导入 ${index + 1}/${files.length}：${files[index].name}`);
+      await importBook(files[index]);
+    }
+    setStatus(`批量导入完成，共 ${files.length} 个文件`);
   });
 
   dom.loadDemoButton.addEventListener("click", () => {
@@ -2638,6 +2649,20 @@ function registerMediaSessionHandlers() {
   });
 }
 
+// Sleep-timer fade-out. Volume cannot change on an in-flight utterance, so
+// each new speech unit inside the final minute starts a step quieter — the
+// book drifts away instead of cutting off mid-sentence at full volume.
+function sleepFadeVolume() {
+  if (!state.sleepTimerEndsAt) {
+    return 1;
+  }
+  const remainingMs = state.sleepTimerEndsAt - Date.now();
+  if (remainingMs >= 60_000) {
+    return 1;
+  }
+  return clamp(remainingMs / 60_000, 0.15, 1);
+}
+
 function applySleepTimerSelection() {
   const minutes = Number(dom.sleepTimerSelect?.value) || 0;
   window.clearTimeout(state.sleepTimerId);
@@ -3820,6 +3845,7 @@ async function playBridgeVoiceAudio(text, voice, handlers = {}) {
   clearActiveAudio();
   const audioUrl = URL.createObjectURL(blob);
   const audio = new Audio(audioUrl);
+  audio.volume = sleepFadeVolume();
   state.activeAudio = audio;
   state.activeAudioUrl = audioUrl;
 
@@ -4151,7 +4177,7 @@ function speakSentenceAt(sentenceIndex, fallbackTried = false, attemptNonce = st
   // Natural pitch. A leftover UI mapping used to force every voice down to
   // 0.8, audibly deepening all speech (the pitch control was removed long ago).
   utterance.pitch = 1;
-  utterance.volume = 1;
+  utterance.volume = sleepFadeVolume();
   let queuedAhead = false;
   utterance.onstart = () => {
     if (attemptNonce !== state.speechAttemptNonce) {
