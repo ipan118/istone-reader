@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v29";
+const APP_VERSION = "v30";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -54,42 +54,6 @@ const OCR_LANGUAGE_LABELS = {
 };
 
 const TONE_PRESETS = {
-  neon: {
-    label: "霓虹夜航",
-    accentPrimary: "#ff4fa6",
-    accentSecondary: "#4fe0ff",
-    accentTertiary: "#ffb058",
-    accentQuaternary: "#8a7dff",
-    accentAux: "#5dffcf",
-    backgroundStops: ["#07111f", "#0c1830", "#12152a"],
-  },
-  sunset: {
-    label: "落日汽水",
-    accentPrimary: "#ff6a5e",
-    accentSecondary: "#4fe0ff",
-    accentTertiary: "#ffd166",
-    accentQuaternary: "#ff8fb7",
-    accentAux: "#ffe6a8",
-    backgroundStops: ["#160c18", "#24143a", "#0f2032"],
-  },
-  mint: {
-    label: "薄荷冰川",
-    accentPrimary: "#4cffc2",
-    accentSecondary: "#5fd2ff",
-    accentTertiary: "#ffe37a",
-    accentQuaternary: "#4fa3ff",
-    accentAux: "#d9fff2",
-    backgroundStops: ["#07151a", "#0f2433", "#0c1b28"],
-  },
-  tech: {
-    label: "量子蓝域",
-    accentPrimary: "#28c7ff",
-    accentSecondary: "#7cf7ff",
-    accentTertiary: "#6f98ff",
-    accentQuaternary: "#2455ff",
-    accentAux: "#d9f4ff",
-    backgroundStops: ["#04111b", "#08233d", "#09162e"],
-  },
   dark: {
     label: "暗色",
     accentPrimary: "#0a84ff",
@@ -296,7 +260,6 @@ const dom = {
   positionRange: document.getElementById("position-range"),
   positionRangeLabel: document.getElementById("position-range-label"),
   positionDotRow: document.getElementById("position-dot-row"),
-  chapterChipList: document.getElementById("chapter-chip-list"),
   sectionLabelPill: document.getElementById("section-label-pill"),
   readerSectionTitle: document.getElementById("reader-section-title"),
   readerFormatPill: document.getElementById("reader-format-pill"),
@@ -350,8 +313,6 @@ function beginBookLoad() {
   activeImportNonce += 1;
   return activeImportNonce;
 }
-
-bootstrap();
 
 async function bootstrap() {
   prepareToneControls();
@@ -753,15 +714,6 @@ function renderSpeechDiagnostics(title, text, stateName = "idle") {
   dom.speechDiagnosticText.textContent = text || fallback;
 }
 
-function refreshToneControls() {
-  const preset = TONE_PRESETS[state.tonePreset] || TONE_PRESETS.dark;
-  dom.tonePill.textContent = preset.label;
-  dom.toneHelper.textContent = `当前是 ${preset.label}。面板浓度越高越稳重，氛围光感越高越鲜明。`;
-  dom.tonePresetButtons.forEach((button) => {
-    button.classList.toggle("active", button.dataset.tonePreset === state.tonePreset);
-  });
-}
-
 function refreshOcrHint() {
   dom.ocrModeSelect.value = state.ocrMode;
   dom.ocrLanguageSelect.value = state.ocrLanguage;
@@ -907,79 +859,6 @@ function applyToneFromState() {
   if (dom.themeMeta) {
     dom.themeMeta.setAttribute("content", isLight ? "#f6f8fc" : "#111827");
   }
-}
-
-function loadVoices() {
-  if (!("speechSynthesis" in window)) {
-    dom.voiceSelect.innerHTML = `<option value="">当前浏览器不支持语音朗读</option>`;
-    dom.voiceReadyPill.textContent = "语音不可用";
-    renderSpeechDiagnostics("朗读不可用", "当前浏览器不支持系统朗读。建议改用最新版 Edge、Chrome 或 iPhone 的 Safari。", "error");
-    return;
-  }
-
-  const browserVoices = window.speechSynthesis
-    .getVoices()
-    .slice()
-    .sort((left, right) => scoreVoice(right) - scoreVoice(left) || `${left.lang}-${left.name}`.localeCompare(`${right.lang}-${right.name}`));
-  state.allVoices = browserVoices;
-  const voices = filterPreferredVoices(browserVoices);
-
-  state.voices = voices;
-  dom.voiceSelect.innerHTML = "";
-
-  if (!voices.length) {
-    dom.voiceSelect.innerHTML = `<option value="">正在等待系统语音加载...</option>`;
-    dom.voiceReadyPill.textContent = "语音加载中";
-    renderSpeechDiagnostics(
-      "等待系统语音",
-      `浏览器已支持朗读，但还没拿到可用声音。${getVoiceEnvironmentGuidance()}${getPlatformSpeechChecks()}`,
-      "warning",
-    );
-    return;
-  }
-
-  voices.forEach((voice) => {
-    const option = document.createElement("option");
-    option.value = voice.voiceURI;
-    option.textContent = formatVoiceOptionLabel(voice);
-    dom.voiceSelect.appendChild(option);
-  });
-
-  const preferredVoice = pickPreferredDefaultVoice(voices) || pickBestVoice(voices, navigator.language || "zh-CN");
-  if (!state.voiceURI || !voices.some((voice) => voice.voiceURI === state.voiceURI)) {
-    state.voiceURI = preferredVoice?.voiceURI || voices[0].voiceURI;
-  }
-
-  dom.voiceSelect.value = state.voiceURI || preferredVoice?.voiceURI || voices[0].voiceURI;
-  state.voiceURI = dom.voiceSelect.value;
-  dom.voiceReadyPill.textContent = `${voices.length} 种精选语音`;
-  dom.voiceReadyPill.textContent = `${voices.length} 种可用语音`;
-  refreshVoiceHint();
-  renderSpeechDiagnostics(
-    "朗读引擎已就绪",
-    `当前设备已筛出 ${voices.length} 种更适合阅读的多语言声音。可以先点“测试发声”确认设备是否真的出声。`,
-    "success",
-  );
-  renderSpeechDiagnostics(
-    "朗读引擎已就绪",
-    `当前页面拿到 ${voices.length} 种可用语音。下拉列表来自这台设备和当前浏览器，不是按书籍文本生成；真正朗读时才会尽量匹配句子的语言。`,
-    "success",
-  );
-}
-
-function refreshVoiceHint() {
-  const voice = state.voices.find((item) => item.voiceURI === state.voiceURI);
-  const counts = summarizeVoiceBuckets(state.voices);
-  const englishHint = counts.english
-    ? `当前列表里有 ${counts.english} 种英文语音。`
-    : "当前设备没有暴露可用英文语音，若想听英文，需要先在这台设备或浏览器里安装 English TTS。";
-  dom.voiceHint.textContent = voice
-    ? `当前已选：${formatVoiceOptionLabel(voice)}。下拉列表来自这台设备和当前浏览器，不是按书籍语言生成；朗读时才会尽量按句子语言匹配声音。${englishHint} 手机端也只会显示手机自己支持的语音。`
-    : `语音来自当前设备系统。不同手机、浏览器和系统语音包，看到的可选声音会不同。${englishHint}`;
-  return;
-  dom.voiceHint.textContent = voice
-    ? `当前已选：${formatVoiceOptionLabel(voice)}。手机端不会继承电脑这套声音列表，而是显示该手机和当前浏览器自己支持的语音。`
-    : "语音来自当前设备系统。不同手机、浏览器和系统语音包，看到的可选声音会不同。";
 }
 
 async function importBook(file) {
@@ -2230,7 +2109,6 @@ function renderBookMeta() {
 
 function renderChapterChips() {
   dom.chapterSelect.innerHTML = "";
-  dom.chapterChipList.innerHTML = "";
   if (!state.book) {
     return;
   }
@@ -2350,15 +2228,6 @@ function renderCurrentSection() {
 
 function updateChipStates() {
   dom.chapterSelect.value = String(state.currentSectionIndex);
-  if (!dom.chapterChipList.children.length) {
-    return;
-  }
-  [...dom.chapterChipList.children].forEach((chip, index) => {
-    chip.classList.toggle("active", index === state.currentSectionIndex);
-    if (index === state.currentSectionIndex) {
-      chip.scrollIntoView({ behavior: "auto", inline: "center", block: "nearest" });
-    }
-  });
 }
 
 function updateProgressDisplays() {
@@ -2499,61 +2368,6 @@ function stepSentence(delta) {
   jumpToSentence(state.currentSentenceIndex + delta);
 }
 
-async function runVoiceSelfTest() {
-  if (!("speechSynthesis" in window)) {
-    renderSpeechDiagnostics("朗读不可用", "当前浏览器不支持系统朗读。建议改用最新版 Edge、Chrome 或 iPhone 的 Safari。", "error");
-    return;
-  }
-
-  await waitForVoices();
-  const selectedVoice = resolveVoiceForText(SPEECH_SELF_TEST_TEXT, { allowUserPreference: true });
-  const utterance = buildSpeechUtterance(SPEECH_SELF_TEST_TEXT, selectedVoice);
-  const attemptNonce = ++state.speechAttemptNonce;
-  let started = false;
-
-  renderSpeechDiagnostics("开始朗读自检", `将尝试用 ${selectedVoice?.name || "默认声音"} 说一句测试语。`, "warning");
-  await resetSpeechEngine();
-
-  const startWatchdog = window.setTimeout(() => {
-    if (started || attemptNonce !== state.speechAttemptNonce) {
-      return;
-    }
-    renderSpeechDiagnostics(
-      "测试语音没有启动",
-      `浏览器没有真正开始发声。优先检查${getPlatformSpeechChecks()}，以及系统是否装好了文字转语音引擎。`,
-      "error",
-    );
-  }, SPEECH_START_TIMEOUT_MS);
-
-  utterance.rate = 1;
-  utterance.pitch = 1;
-  utterance.volume = 1;
-  utterance.onstart = () => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    renderSpeechDiagnostics(
-      "浏览器已开始发声",
-      `如果你听到了测试语音，说明网页发声流程正常；如果没听到，优先检查${getPlatformSpeechChecks()}`,
-      "success",
-    );
-  };
-  utterance.onend = () => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    renderSpeechDiagnostics(
-      "测试语音已结束",
-      `浏览器完成了测试播放。如果整个过程都没声音，问题更可能在设备音量、系统 TTS 或当前浏览器限制。${getPlatformSpeechChecks()}`,
-      "warning",
-    );
-  };
-  utterance.onerror = (event) => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    handleSpeechError(event, "self-test");
-  };
-  window.speechSynthesis.speak(utterance);
-}
-
 function renderJumpButtons(container, totalCount, activeIndex, onJump) {
   container.innerHTML = "";
   if (!totalCount || totalCount <= 1) {
@@ -2610,170 +2424,6 @@ function highlightSentence(index, options = { smooth: true }) {
     highlightParagraphAndScroll(state.currentParagraphIndex, options);
   }
   updateProgressDisplays();
-}
-
-async function startSpeech() {
-  if (!state.book) {
-    setStatus("请先导入书籍");
-    renderSpeechDiagnostics("还没有书", "请先导入一本书，再测试连续朗读。若只是想确认设备是否出声，请点“测试发声”。", "warning");
-    return;
-  }
-
-  if (!("speechSynthesis" in window)) {
-    setStatus("当前浏览器不支持朗读");
-    renderSpeechDiagnostics("朗读不可用", "当前浏览器不支持系统朗读。建议改用最新版 Edge、Chrome 或 iPhone 的 Safari。", "error");
-    return;
-  }
-
-  const sentences = getCurrentSentences();
-  if (!sentences.length) {
-    setStatus("当前章节没有可朗读内容");
-    renderSpeechDiagnostics("当前章节无法朗读", "这一章没有拆出可读句子。请切换到其他章节或重新导入书籍。", "warning");
-    return;
-  }
-
-  await waitForVoices();
-
-  if (state.paused && (window.speechSynthesis.paused || window.speechSynthesis.speaking)) {
-    window.speechSynthesis.resume();
-    state.paused = false;
-    state.speaking = true;
-    dom.speechStateHint.textContent = "朗读已继续";
-    renderSpeechDiagnostics("朗读已继续", `浏览器已继续播放。如果仍然没有声音，请检查${getPlatformSpeechChecks()}`, "success");
-    return;
-  }
-
-  await restartChapterSpeechFromIndex(clamp(state.currentSentenceIndex, 0, sentences.length - 1));
-}
-
-async function restartChapterSpeechFromIndex(sentenceIndex) {
-  await resetSpeechEngine();
-  state.paused = false;
-  state.speaking = true;
-  speakSentenceAt(sentenceIndex);
-}
-
-function speakSentenceAt(sentenceIndex, fallbackTried = false) {
-  const sentences = getCurrentSentences();
-  if (sentenceIndex >= sentences.length) {
-    state.speaking = false;
-    state.paused = false;
-    dom.speechStateHint.textContent = "本章朗读结束";
-    updateSpeechProgress();
-    renderSpeechDiagnostics("本章朗读结束", "浏览器已经完整播完本章。如果你完全没听到声音，请重点检查系统媒体音量或标签页静音。", "success");
-    return;
-  }
-
-  const speechUnit = getSpeechUnitForSentence(sentenceIndex);
-  const slicedUnit = speechUnit ? sliceSpeechUnit(speechUnit, sentenceIndex, sentences) : null;
-  const speechText = slicedUnit?.text || sentences[sentenceIndex];
-  const nextSentenceIndex = slicedUnit?.sentenceIndexes.at(-1) ?? sentenceIndex;
-  const sanitizedSpeechText = sanitizeTextForSpeech(speechText);
-  if (!sanitizedSpeechText) {
-    speakSentenceAt(nextSentenceIndex + 1, fallbackTried);
-    return;
-  }
-
-  const selectedVoice = resolveVoiceForText(sanitizedSpeechText, {
-    allowUserPreference: !fallbackTried,
-    forceUserPreference: !fallbackTried,
-  });
-  const utterance = buildSpeechUtterance(speechText, selectedVoice);
-  const attemptNonce = ++state.speechAttemptNonce;
-  let started = false;
-  const startWatchdog = window.setTimeout(() => {
-    if (started || attemptNonce !== state.speechAttemptNonce) {
-      return;
-    }
-    renderSpeechDiagnostics(
-      "朗读没有真正启动",
-      `浏览器接收了命令，但没有开始发声。常见原因是当前声音不可用，或系统朗读引擎未准备好。${getPlatformSpeechChecks()}`,
-      "warning",
-    );
-  }, SPEECH_START_TIMEOUT_MS);
-
-  utterance.rate = state.rate;
-  utterance.pitch = state.pitch;
-  utterance.volume = 1;
-  utterance.onstart = () => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    state.currentSentenceIndex = sentenceIndex;
-    state.activeUtterance = utterance;
-    const snippet = sentences[sentenceIndex].trim().slice(0, 28);
-    dom.speechStateHint.textContent = `正在朗读：${snippet}${sentences[sentenceIndex].length > 28 ? "..." : ""}`;
-    highlightSentence(state.currentSentenceIndex);
-    updateSpeechProgress();
-    renderSpeechDiagnostics(
-      "浏览器已开始发声",
-      `当前使用 ${selectedVoice?.name || "默认声音"}。如果状态显示正在朗读但你还是没听到，请检查${getPlatformSpeechChecks()}`,
-      "success",
-    );
-  };
-  utterance.onboundary = (event) => {
-    if (typeof event?.charIndex === "number" && slicedUnit?.boundaries?.length) {
-      syncSpeechBoundary(slicedUnit.boundaries, event.charIndex);
-    }
-  };
-  utterance.onend = () => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    if (!state.speaking || state.paused) {
-      return;
-    }
-    state.currentSentenceIndex = nextSentenceIndex + 1;
-    updateSpeechProgress();
-    speakSentenceAt(nextSentenceIndex + 1, false);
-  };
-  utterance.onerror = (event) => {
-    started = true;
-    window.clearTimeout(startWatchdog);
-    state.speaking = false;
-    state.paused = false;
-    dom.speechStateHint.textContent = "语音朗读中断，请重新开始";
-    if (!fallbackTried && shouldRetryWithFallbackVoice(event, selectedVoice)) {
-      renderSpeechDiagnostics("当前声音不可用，正在切回默认声音", "浏览器拒绝了当前选中的声音，系统正在尝试默认声音。", "warning");
-      state.voiceURI = "";
-      loadVoices();
-      void restartChapterSpeechFromIndex(sentenceIndex);
-      return;
-    }
-    handleSpeechError(event, "chapter");
-  };
-  window.speechSynthesis.speak(utterance);
-}
-
-function togglePause() {
-  if (!("speechSynthesis" in window) || (!window.speechSynthesis.speaking && !window.speechSynthesis.paused)) {
-    return;
-  }
-  if (window.speechSynthesis.paused) {
-    window.speechSynthesis.resume();
-    state.paused = false;
-    state.speaking = true;
-    dom.speechStateHint.textContent = "朗读已继续";
-    renderSpeechDiagnostics("朗读已继续", `如果仍然没有声音，请检查${getPlatformSpeechChecks()}`, "success");
-  } else {
-    window.speechSynthesis.pause();
-    state.paused = true;
-    state.speaking = false;
-    dom.speechStateHint.textContent = "朗读已暂停";
-    renderSpeechDiagnostics("朗读已暂停", "已暂停当前朗读，再次点击“暂停 / 继续”可以恢复。", "warning");
-  }
-}
-
-function stopSpeech(options = {}) {
-  if ("speechSynthesis" in window) {
-    window.speechSynthesis.cancel();
-  }
-  state.speaking = false;
-  state.paused = false;
-  state.activeUtterance = null;
-  updateSpeechProgress();
-  if (!options.silent) {
-    dom.speechStateHint.textContent = "朗读已停止";
-    renderSpeechDiagnostics("朗读已停止", "浏览器已经停止播放。你可以点“测试发声”先排查设备是否出声，再继续整章朗读。", "warning");
-  }
 }
 
 async function acquireWakeLock() {
@@ -3359,47 +3009,12 @@ function looksLikeLowQualityPdfText(text) {
   );
 }
 
-function isSpeechActive() {
-  return ("speechSynthesis" in window && (window.speechSynthesis.speaking || window.speechSynthesis.paused)) || state.speaking || state.paused;
-}
 
 
 
 
 
 
-
-
-function getVoiceBucket(lang) {
-  const normalized = (lang || "").trim().toLowerCase().replace(/_/g, "-");
-  if (
-    normalized.startsWith("zh-cn") ||
-    normalized.startsWith("zh-sg") ||
-    normalized.startsWith("zh-hans") ||
-    normalized.startsWith("cmn-hans")
-  ) {
-    return "zh-cn";
-  }
-  if (
-    normalized.startsWith("zh-tw") ||
-    normalized.startsWith("zh-hk") ||
-    normalized.startsWith("zh-mo") ||
-    normalized.startsWith("zh-hant") ||
-    normalized.startsWith("cmn-hant")
-  ) {
-    return "zh-tw";
-  }
-  if (normalized.startsWith("en-us")) {
-    return "en-us";
-  }
-  if (normalized.startsWith("en-gb")) {
-    return "en-gb";
-  }
-  if (normalized.startsWith("en-")) {
-    return "en-global";
-  }
-  return normalized;
-}
 
 function getVoiceBase(lang) {
   return getVoiceBucket(lang).split("-")[0];
@@ -3484,63 +3099,6 @@ function filterPreferredVoices(voices) {
   }
 
   return picked;
-}
-
-function scoreVoice(voice) {
-  const lang = getVoiceBucket(voice.lang);
-  const name = (voice.name || "").toLowerCase();
-  let score = 0;
-
-  const priorityIndex = PRIORITY_VOICE_BUCKETS.indexOf(lang);
-  if (priorityIndex >= 0) {
-    score += 130 - priorityIndex * 8;
-  } else if (getVoiceBase(lang) === getVoiceBase(navigator.language || "zh-CN")) {
-    score += 32;
-  }
-
-  if (voice.default) {
-    score += 18;
-  }
-  if (voice.localService) {
-    score += 10;
-  }
-  if (isBridgeVoice(voice)) {
-    score += 26;
-  }
-  if (lang === "zh-cn" && PREFERRED_ZH_CN_VOICE_NAMES.some((keyword) => name.includes(keyword))) {
-    score += 40;
-  }
-  if (lang.startsWith("en-") && PREFERRED_EN_VOICE_NAMES.some((keyword) => name.includes(keyword))) {
-    score += 22;
-  }
-  if (name.includes("natural")) {
-    score += 8;
-  }
-  if (name.includes("neural")) {
-    score += 6;
-  }
-
-  return score;
-}
-
-function formatVoiceOptionLabel(voice) {
-  const bucket = getVoiceBucket(voice.lang);
-  const bucketLabel =
-    {
-      "zh-cn": "中文简体",
-      "zh-tw": "中文繁体",
-      "en-us": "English US",
-      "en-gb": "English UK",
-      "en-global": "English",
-      "ja-jp": "日本語",
-      "ko-kr": "한국어",
-      "fr-fr": "Français",
-      "de-de": "Deutsch",
-      "es-es": "Español",
-      "it-it": "Italiano",
-    }[bucket] || (voice.lang || "其他语音");
-  const cleanName = cleanVoiceDisplayName(voice.name);
-  return `${bucketLabel} · ${cleanName}${voice.default ? " · 默认" : ""}`;
 }
 
 function pickPreferredDefaultVoice(voices) {
@@ -3634,58 +3192,6 @@ function pickBestVoice(voices, targetLang) {
     voices.find((voice) => voice.default) ||
     voices[0]
   );
-}
-
-async function waitForVoices(timeoutMs = 1800) {
-  if (!("speechSynthesis" in window)) {
-    return [];
-  }
-
-  const current = window.speechSynthesis.getVoices();
-  if (current.length) {
-    state.allVoices = current.slice();
-    loadVoices();
-    return current;
-  }
-
-  return await new Promise((resolve) => {
-    let resolved = false;
-    const finish = () => {
-      if (resolved) {
-        return;
-      }
-      resolved = true;
-      const voices = window.speechSynthesis.getVoices();
-      state.allVoices = voices.slice();
-      loadVoices();
-      resolve(voices);
-    };
-
-    const pollTimer = window.setInterval(() => {
-      if (window.speechSynthesis.getVoices().length) {
-        window.clearInterval(pollTimer);
-        window.clearTimeout(timeoutTimer);
-        finish();
-      }
-    }, 200);
-
-    const timeoutTimer = window.setTimeout(() => {
-      window.clearInterval(pollTimer);
-      finish();
-    }, timeoutMs);
-
-    if (typeof window.speechSynthesis.addEventListener === "function") {
-      window.speechSynthesis.addEventListener(
-        "voiceschanged",
-        () => {
-          window.clearInterval(pollTimer);
-          window.clearTimeout(timeoutTimer);
-          finish();
-        },
-        { once: true },
-      );
-    }
-  });
 }
 
 async function resetSpeechEngine() {
@@ -3910,7 +3416,7 @@ function summarizeVoiceBuckets(voices) {
   );
 }
 
-getVoiceBucket = function (lang) {
+function getVoiceBucket(lang) {
   const normalized = (lang || "").trim().toLowerCase().replace(/_/g, "-");
   if (
     normalized.startsWith("zh-cn") ||
@@ -3939,9 +3445,9 @@ getVoiceBucket = function (lang) {
     return "en-global";
   }
   return normalized;
-};
+}
 
-scoreVoice = function (voice) {
+function scoreVoice(voice) {
   const lang = getVoiceBucket(voice.lang);
   const name = (voice.name || "").toLowerCase();
   let score = 0;
@@ -3973,9 +3479,9 @@ scoreVoice = function (voice) {
   }
 
   return score;
-};
+}
 
-formatVoiceOptionLabel = function (voice) {
+function formatVoiceOptionLabel(voice) {
   const bucket = getVoiceBucket(voice.lang);
   const bucketLabel =
     {
@@ -3994,16 +3500,16 @@ formatVoiceOptionLabel = function (voice) {
   const cleanName = cleanVoiceDisplayName(voice.name);
   const sourceTag = isBridgeVoice(voice) ? " · Windows稳定" : " · 浏览器";
   return `${bucketLabel} · ${cleanName}${sourceTag}${voice.default ? " · 默认" : ""}`;
-};
+}
 
-refreshToneControls = function () {
+function refreshToneControls() {
   const preset = TONE_PRESETS[state.tonePreset] || TONE_PRESETS.dark;
   dom.tonePill.textContent = preset.label;
   dom.toneHelper.textContent = `当前已切换到 ${preset.label}。现在只保留贴近 Windows 风格的浅色和暗色两套配色。`;
   dom.tonePresetButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tonePreset === state.tonePreset);
   });
-};
+}
 
 refreshToneControls();
 
@@ -4047,7 +3553,7 @@ async function getBrowserVoicesForCatalog(timeoutMs = VOICE_CATALOG_WAIT_MS) {
   });
 }
 
-loadVoices = async function (options = {}) {
+async function loadVoices(options = {}) {
   const previousVoiceURI = state.voiceURI;
   const browserVoices = (await getBrowserVoicesForCatalog())
     .slice()
@@ -4115,9 +3621,9 @@ loadVoices = async function (options = {}) {
       "success",
     );
   }
-};
+}
 
-waitForVoices = async function (timeoutMs = 1800) {
+async function waitForVoices(timeoutMs = 1800) {
   const bridgeVoices = selectBridgeSupplementVoices("speechSynthesis" in window ? window.speechSynthesis.getVoices() : [], await loadBridgeVoices());
   if (!("speechSynthesis" in window)) {
     state.allVoices = mergeVoiceCatalog([], bridgeVoices);
@@ -4169,14 +3675,14 @@ waitForVoices = async function (timeoutMs = 1800) {
       void finish();
     };
   });
-};
+}
 
 
-isSpeechActive = function () {
+function isSpeechActive() {
   const browserSpeaking = "speechSynthesis" in window && (window.speechSynthesis.speaking || window.speechSynthesis.paused);
   const audioSpeaking = Boolean(state.activeAudio && (!state.activeAudio.paused || state.paused));
   return browserSpeaking || audioSpeaking || state.speaking || state.paused;
-};
+}
 
 function loadBridgeVoices() {
   return fetch(WINDOWS_VOICE_ENDPOINT, { cache: "no-store" })
@@ -4339,7 +3845,7 @@ async function playBridgeVoiceAudio(text, voice, handlers = {}) {
   return audio;
 }
 
-runVoiceSelfTest = async function () {
+async function runVoiceSelfTest() {
   const availableVoices = await waitForVoices();
   const selectedVoice =
     getUserSelectedVoice(availableVoices) ||
@@ -4400,9 +3906,9 @@ runVoiceSelfTest = async function () {
     renderSpeechDiagnostics("测试语音没有启动", `浏览器没有真正开始发声。${getPlatformSpeechChecks()}`, "error");
   };
   window.speechSynthesis.speak(utterance);
-};
+}
 
-startSpeech = async function () {
+async function startSpeech() {
   window.clearTimeout(state.speechRestartTimer);
   window.clearTimeout(state.rateRestartTimer);
   state.awaitingMoreSections = false;
@@ -4444,9 +3950,9 @@ startSpeech = async function () {
   state.speaking = true;
   state.paused = false;
   await restartChapterSpeechFromIndex(clamp(state.currentSentenceIndex, 0, sentences.length - 1));
-};
+}
 
-restartChapterSpeechFromIndex = async function (sentenceIndex) {
+async function restartChapterSpeechFromIndex(sentenceIndex) {
   const attemptNonce = ++state.speechAttemptNonce;
   state.utteranceRefs = [];
   clearActiveAudio();
@@ -4458,13 +3964,13 @@ restartChapterSpeechFromIndex = async function (sentenceIndex) {
   state.paused = false;
   onSpeechPlaybackStarted();
   speakSentenceAt(sentenceIndex, false, attemptNonce);
-};
+}
 
 // Returns true when a browser utterance was actually queued into the speech
 // engine. With { queueOnly: true } the unit is appended to the engine queue
 // as look-ahead while the previous unit is still speaking, which removes the
 // per-sentence startup gap that makes mobile playback choppy.
-speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce = state.speechAttemptNonce, overrideVoice = null, options = {}) {
+function speakSentenceAt(sentenceIndex, fallbackTried = false, attemptNonce = state.speechAttemptNonce, overrideVoice = null, options = {}) {
   if (attemptNonce !== state.speechAttemptNonce) {
     return false;
   }
@@ -4678,9 +4184,9 @@ speakSentenceAt = function (sentenceIndex, fallbackTried = false, attemptNonce =
   }
   window.speechSynthesis.speak(utterance);
   return true;
-};
+}
 
-togglePause = async function () {
+async function togglePause() {
   if (state.activeAudio) {
     if (state.activeAudio.paused) {
       await state.activeAudio.play();
@@ -4714,9 +4220,9 @@ togglePause = async function () {
     dom.speechStateHint.textContent = "朗读已暂停";
     onSpeechPlaybackStopped({ paused: true });
   }
-};
+}
 
-stopSpeech = function (options = {}) {
+function stopSpeech(options = {}) {
   state.speechAttemptNonce += 1;
   state.awaitingMoreSections = false;
   state.activeUnitStartedAt = 0;
@@ -4736,11 +4242,9 @@ stopSpeech = function (options = {}) {
   if (!options.silent) {
     dom.speechStateHint.textContent = "朗读已停止";
   }
-};
+}
 
-void loadVoices();
-
-refreshVoiceHint = function () {
+function refreshVoiceHint() {
   const allVisibleVoices = state.voices.length ? state.voices : state.allVoices;
   const voice = allVisibleVoices.find((item) => item.voiceURI === state.voiceURI) || null;
   const voiceCounts = summarizeVoiceBuckets(allVisibleVoices);
@@ -4759,7 +4263,7 @@ refreshVoiceHint = function () {
   dom.voiceHint.textContent = voice
     ? `当前已选：${formatVoiceOptionLabel(voice)}。${environmentHint}${stabilityHint}${englishVoiceHint}${routingHint}`
     : `语音来自当前设备系统。不同手机、浏览器和系统语音包，看到的可选声音会不同。${defaultHint}${environmentHint}${stabilityHint}${englishVoiceHint}${routingHint}`;
-};
+}
 
 function loadDemoBook(options = {}) {
   beginBookLoad();
@@ -4808,3 +4312,6 @@ function rgbaFromHex(hex, alpha) {
   const blue = bigint & 255;
   return `rgba(${red}, ${green}, ${blue}, ${alpha.toFixed(3)})`;
 }
+
+// Start the app only after every module-level binding above is initialized.
+bootstrap();

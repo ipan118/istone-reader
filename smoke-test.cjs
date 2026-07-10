@@ -7,7 +7,7 @@ const targetUrl = process.env.TARGET_URL || "http://127.0.0.1:4173/";
 const sampleTxt = path.join(appDir, "sample-books", "aurora-demo.txt");
 
 (async () => {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}) });
   const context = await browser.newContext({ viewport: { width: 430, height: 932 } });
   const page = await context.newPage();
   page.on("pageerror", (error) => {

@@ -50,16 +50,15 @@ http://127.0.0.1:4173/
 node --test tests/text-pipeline.test.mjs
 ```
 
-冒烟测试基于 Playwright（使用其自带 Chromium）：
+端到端回归（Playwright，覆盖冒烟、迷你播放条、媒体锚定、桌面模式布局、存储迁移、调速续播、导入进度、渐进导入 + OCR 缓存、子路径 SW 预缓存）：
 
 ```bash
 npm install playwright
 npx playwright install chromium
-python3 -m http.server 4173 --bind 127.0.0.1 &
-node smoke-test.cjs
+bash tests/e2e/run-all.sh
 ```
 
-可通过 `TARGET_URL` 环境变量指定其他地址。
+脚本自行启动/清理本地静态服务器；已有 Chromium 时可用 `CHROMIUM_PATH` 指定二进制而免下载。单独运行某一项：先起 `python3 -m http.server 4173 --bind 127.0.0.1`，再 `node tests/e2e/<脚本>.cjs`（可用 `TARGET_URL` 改地址）。`tests/e2e/fixtures/` 里的 PDF 夹具已入库，需重新生成时 `npm install pdf-lib` 后运行 `node tests/e2e/gen-pdfs.cjs`。
 
 ## 目录说明
 
