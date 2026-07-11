@@ -31,8 +31,11 @@ const OCR_MOBILE_TARGET_LONG_EDGE = 2200;
 const OCR_MOBILE_MAX_PIXELS = 5_500_000;
 
 let pdfDoc = null;
-let lastCanvas = null; // kept so a PSM retry can produce another bitmap
-let lastPageKey = "";
+// Prepared canvases kept for PSM retries. A small keyed cache (instead of a
+// single slot) so parallel recognizers rendering ahead don't clobber the
+// canvas another page still needs for its retry.
+const canvasCache = new Map();
+const CANVAS_CACHE_LIMIT = 4;
 
 self.onmessage = async (event) => {
   const message = event.data;
@@ -46,18 +49,23 @@ self.onmessage = async (event) => {
       self.postMessage({ type: "loaded", id });
     } else if (type === "render") {
       const canvas = await renderAndPrepare(message.pageNumber, Boolean(message.mobile));
-      lastCanvas = canvas;
-      lastPageKey = pageKey(message.pageNumber, Boolean(message.mobile));
+      const key = pageKey(message.pageNumber, Boolean(message.mobile));
+      canvasCache.delete(key);
+      canvasCache.set(key, canvas);
+      while (canvasCache.size > CANVAS_CACHE_LIMIT) {
+        canvasCache.delete(canvasCache.keys().next().value);
+      }
       // Tesseract.js accepts a Blob directly; a PNG Blob is far cheaper to move
       // across the worker boundary than raw ImageData and is universally handled
       // (ImageBitmap is NOT accepted by tesseract.js v5).
       const blob = await canvasToPngBlob(canvas);
       self.postMessage({ type: "rendered", id, blob });
     } else if (type === "rebitmap") {
-      if (!lastCanvas || lastPageKey !== pageKey(message.pageNumber, Boolean(message.mobile))) {
+      const cached = canvasCache.get(pageKey(message.pageNumber, Boolean(message.mobile)));
+      if (!cached) {
         self.postMessage({ type: "rebitmap-unavailable", id });
       } else {
-        const blob = await canvasToPngBlob(lastCanvas);
+        const blob = await canvasToPngBlob(cached);
         self.postMessage({ type: "rendered", id, blob });
       }
     } else if (type === "release") {
@@ -81,8 +89,7 @@ async function loadDocument(source) {
 }
 
 async function releaseDocument() {
-  lastCanvas = null;
-  lastPageKey = "";
+  canvasCache.clear();
   const doc = pdfDoc;
   pdfDoc = null;
   if (doc) {

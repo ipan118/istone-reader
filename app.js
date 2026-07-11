@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v35";
+const APP_VERSION = "v36";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -179,7 +179,10 @@ const state = {
   toneGlow: 54,
   ocrMode: "auto",
   ocrLanguage: "eng+chi_sim",
-  ocrWorker: null,
+  // Recognition worker pool: 1 worker on constrained devices, 2 on machines
+  // with memory/core headroom (each holds ~200 MB with the Chinese model).
+  ocrWorkerPool: [],
+  ocrWorkerBusy: new Set(),
   ocrWorkerKey: "",
   ocrEffectiveLanguage: "",
   // OCR render worker (OffscreenCanvas + pdf.js, off main thread).
@@ -1014,9 +1017,76 @@ async function importPdfBook(file, importNonce) {
   // Rolling window of recent page durations drives the remaining-time estimate
   // (per-page cost shifts a lot between text pages and OCR pages).
   const recentPageDurations = [];
-  let ocrRenderLoaded = false;
   let ocrPageCount = 0;
   let cachedOcrPages = 0;
+
+  // Loading the render worker's document happens at most once, even when
+  // several look-ahead pages hit their first OCR simultaneously.
+  let renderDocPromise = null;
+  const ensureRenderDocOnce = () => {
+    if (!canUseOcrRenderWorker) {
+      return Promise.resolve(false);
+    }
+    if (!renderDocPromise) {
+      renderDocPromise = loadOcrRenderDocument(file).catch((error) => {
+        console.warn("OCR render worker load failed:", error);
+        return false;
+      });
+    }
+    return renderDocPromise;
+  };
+
+  // Prepares one page end-to-end (text layer → cache → OCR). Safe to run
+  // ahead of the consumer: recognition concurrency is bounded by the worker
+  // pool semaphore inside recognizePdfPage.
+  const processPage = async (pageNumber) => {
+    const page = await pdf.getPage(pageNumber);
+    const content = await page.getTextContent();
+    let text = normalizeWhitespace(pdfTextItemsToString(content.items));
+    let ocrUsed = false;
+    let fromCache = false;
+
+    if (shouldRunOcr(text)) {
+      const cacheLang = state.ocrLanguage;
+      const cachedRecord = await getCachedOcrPage(fileKey, pageNumber, cacheLang).catch(() => null);
+      if (cachedRecord && typeof cachedRecord.text === "string") {
+        // Cache hit — including "" for pages recognition already found empty.
+        if (cachedRecord.text) {
+          text = repairOcrLineBreaks(cachedRecord.text);
+          maybeNarrowOcrLanguage(text);
+          ocrUsed = true;
+          fromCache = true;
+        }
+      } else {
+        await ensureRenderDocOnce();
+        const ocrText = await recognizePdfPage(page, pageNumber, totalPages);
+        // Only cache when the engine actually ran (a missing engine returns ""
+        // too and must not mark the page as known-empty) and the import is
+        // still the active one.
+        if (window.Tesseract && importNonce === activeImportNonce) {
+          void saveCachedOcrPage({ fileKey, pageNumber, lang: cacheLang, text: ocrText || "" }).catch(() => {});
+        }
+        if (ocrText) {
+          text = repairOcrLineBreaks(ocrText);
+          ocrUsed = true;
+        }
+      }
+    }
+    return { pageNumber, text, ocrUsed, fromCache };
+  };
+
+  // Bounded look-ahead pipeline: pages are prepared up to (pool size + 1)
+  // ahead while results are consumed strictly in order, so the progressive
+  // publisher and the per-page cache behave exactly as in the serial flow.
+  const lookahead = [];
+  let nextPageToSchedule = 1;
+  const lookaheadLimit = computeOcrConcurrency() + 1;
+  const scheduleLookahead = () => {
+    while (nextPageToSchedule <= totalPages && lookahead.length < lookaheadLimit) {
+      lookahead.push(processPage(nextPageToSchedule));
+      nextPageToSchedule += 1;
+    }
+  };
 
   try {
     for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
@@ -1028,51 +1098,20 @@ async function importPdfBook(file, importNonce) {
       setStatus(
         publisher.published ? `后台解析中 ${pageNumber} / ${totalPages}` : `PDF 解析中 ${pageNumber} / ${totalPages}`,
       );
-      const page = await pdf.getPage(pageNumber);
-      const content = await page.getTextContent();
-      let text = normalizeWhitespace(pdfTextItemsToString(content.items));
-      let ocrUsed = false;
-
-      if (shouldRunOcr(text)) {
-        const cacheLang = state.ocrLanguage;
-        const cachedRecord = await getCachedOcrPage(fileKey, pageNumber, cacheLang).catch(() => null);
-        if (cachedRecord && typeof cachedRecord.text === "string") {
-          // Cache hit — including "" for pages recognition already found empty.
-          if (cachedRecord.text) {
-            text = repairOcrLineBreaks(cachedRecord.text);
-            maybeNarrowOcrLanguage(text);
-            ocrUsed = true;
-            ocrPageCount += 1;
-            cachedOcrPages += 1;
-          }
-        } else {
-          if (!ocrRenderLoaded && canUseOcrRenderWorker) {
-            try {
-              ocrRenderLoaded = await loadOcrRenderDocument(file);
-            } catch (error) {
-              console.warn("OCR render worker load failed:", error);
-              ocrRenderLoaded = false;
-            }
-          }
-          const ocrText = await recognizePdfPage(page, pageNumber, totalPages);
-          if (importNonce !== activeImportNonce) {
-            publisher.stop();
-            return;
-          }
-          // Only cache when the engine actually ran; a missing engine returns
-          // "" too and must not mark the page as known-empty.
-          if (window.Tesseract) {
-            void saveCachedOcrPage({ fileKey, pageNumber, lang: cacheLang, text: ocrText || "" }).catch(() => {});
-          }
-          if (ocrText) {
-            text = repairOcrLineBreaks(ocrText);
-            ocrUsed = true;
-            ocrPageCount += 1;
-          }
+      scheduleLookahead();
+      const result = await lookahead.shift();
+      if (importNonce !== activeImportNonce) {
+        publisher.stop();
+        return;
+      }
+      if (result.ocrUsed) {
+        ocrPageCount += 1;
+        if (result.fromCache) {
+          cachedOcrPages += 1;
         }
       }
 
-      pendingPages.push({ pageNumber, text, ocrUsed });
+      pendingPages.push({ pageNumber: result.pageNumber, text: result.text, ocrUsed: result.ocrUsed });
       publisher.maybePublish(pendingPages, { pageNumber, startedAt });
 
       recentPageDurations.push(Date.now() - pageStartedAt);
@@ -1101,6 +1140,9 @@ async function importPdfBook(file, importNonce) {
     return;
   } finally {
     updateImportProgress(null);
+    // In-flight look-ahead pages may still reject after an abort; swallow so
+    // they never surface as unhandled rejections.
+    lookahead.forEach((task) => task.catch(() => {}));
     // Always release the render worker's document so its memory is freed even
     // if parsing throws or the user cancels.
     void releaseOcrRenderDocument();
@@ -1639,14 +1681,15 @@ async function recognizePdfPage(page, pageNumber, totalPages) {
     return "";
   }
 
-  const worker = await ensureOcrWorker();
   const mobile = isMobileDevice();
   setStatus(`扫描识别中 ${pageNumber} / ${totalPages}`);
 
   // Preferred path: render + preprocess in the OCR render worker (OffscreenCanvas
   // + pdf.js), so neither the pdf.js render nor the pixel loop blocks the UI.
-  // The worker returns a PNG Blob that tesseract.js recognizes directly.
+  // The worker returns a PNG Blob that tesseract.js recognizes directly. This
+  // path is safe to run concurrently (one recognition per pool worker).
   if (state.ocrRenderWorker && state.ocrRenderLoaded) {
+    const worker = await acquireOcrWorker(computeOcrConcurrency());
     try {
       const blob = await renderOcrPageBlob(pageNumber, mobile);
       if (blob) {
@@ -1668,36 +1711,44 @@ async function recognizePdfPage(page, pageNumber, totalPages) {
       // main-thread path so OCR still works.
       console.warn("OCR render worker failed, falling back to main thread:", error);
       await releaseOcrRenderDocument();
+    } finally {
+      releaseOcrWorker(worker);
     }
   }
 
-  // Fallback: render + preprocess on the main thread (older browsers / WebViews).
-  const baseViewport = page.getViewport({ scale: 1 });
-  const scale = calculateOcrRenderScale(baseViewport);
-  const viewport = page.getViewport({ scale });
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  canvas.width = Math.ceil(viewport.width);
-  canvas.height = Math.ceil(viewport.height);
+  // Fallback: render + preprocess on the main thread (older browsers / WebViews);
+  // acquiring with concurrency 1 serializes it.
+  const worker = await acquireOcrWorker(1);
+  try {
+    const baseViewport = page.getViewport({ scale: 1 });
+    const scale = calculateOcrRenderScale(baseViewport);
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
 
-  if (!context) {
-    return "";
+    if (!context) {
+      return "";
+    }
+
+    await page.render({ canvasContext: context, viewport }).promise;
+    const preparedCanvas = prepareCanvasForOcr(canvas);
+    const firstResult = await recognizeWithOcrMode(worker, preparedCanvas, "3");
+    // Re-running with another segmentation mode doubles per-page time, so
+    // only do it when the first pass produced almost nothing.
+    const needsRetry = countMeaningfulCharacters(firstResult.text) < OCR_RETRY_MIN_CHARS;
+    const result = needsRetry ? pickBetterOcrCandidate(firstResult, await recognizeWithOcrMode(worker, preparedCanvas, "6")) : firstResult;
+    preparedCanvas.width = 0;
+    preparedCanvas.height = 0;
+    canvas.width = 0;
+    canvas.height = 0;
+    const text = normalizeWhitespace(result.text || "");
+    maybeNarrowOcrLanguage(text);
+    return text;
+  } finally {
+    releaseOcrWorker(worker);
   }
-
-  await page.render({ canvasContext: context, viewport }).promise;
-  const preparedCanvas = prepareCanvasForOcr(canvas);
-  const firstResult = await recognizeWithOcrMode(worker, preparedCanvas, "3");
-  // Re-running with another segmentation mode doubles per-page time, so
-  // only do it when the first pass produced almost nothing.
-  const needsRetry = countMeaningfulCharacters(firstResult.text) < OCR_RETRY_MIN_CHARS;
-  const result = needsRetry ? pickBetterOcrCandidate(firstResult, await recognizeWithOcrMode(worker, preparedCanvas, "6")) : firstResult;
-  preparedCanvas.width = 0;
-  preparedCanvas.height = 0;
-  canvas.width = 0;
-  canvas.height = 0;
-  const text = normalizeWhitespace(result.text || "");
-  maybeNarrowOcrLanguage(text);
-  return text;
 }
 
 function isMobileDevice() {
@@ -1854,15 +1905,20 @@ function scoreOcrCandidate(candidate) {
   return meaningful * 2 + Number(candidate?.confidence || 0) - symbolRatio * 120;
 }
 
-async function ensureOcrWorker() {
-  const workerKey = state.ocrEffectiveLanguage || state.ocrLanguage;
-  if (state.ocrWorker && state.ocrWorkerKey === workerKey) {
-    return state.ocrWorker;
+// Two parallel recognizers roughly halve scanned-book import time, but each
+// Tesseract worker holds ~200 MB with the Chinese model, so the second one is
+// gated on device headroom (the render worker and main thread need cores too).
+function computeOcrConcurrency() {
+  if (!supportsOcrRenderWorker()) {
+    return 1;
   }
+  const memory = navigator.deviceMemory || 4;
+  const cores = navigator.hardwareConcurrency || 4;
+  return memory >= 6 && cores >= 4 ? 2 : 1;
+}
 
-  await terminateOcrWorker();
-  setStatus(`正在准备 OCR（${OCR_LANGUAGE_LABELS[workerKey] || "中英混合"}）`);
-  state.ocrWorker = await window.Tesseract.createWorker(getOcrLanguageArgument(workerKey), 1, {
+async function createOcrWorkerInstance(workerKey) {
+  const worker = await window.Tesseract.createWorker(getOcrLanguageArgument(workerKey), 1, {
     ...OCR_ASSET_PATHS,
     logger(message) {
       if (typeof message.progress === "number") {
@@ -1870,13 +1926,60 @@ async function ensureOcrWorker() {
       }
     },
   });
-  await state.ocrWorker.setParameters({
+  await worker.setParameters({
     preserve_interword_spaces: "1",
     tessedit_pageseg_mode: "3",
     user_defined_dpi: "300",
   });
-  state.ocrWorkerKey = workerKey;
-  return state.ocrWorker;
+  return worker;
+}
+
+async function ensureOcrWorkerPool(size) {
+  const workerKey = state.ocrEffectiveLanguage || state.ocrLanguage;
+  if (state.ocrWorkerKey !== workerKey) {
+    await terminateOcrWorker();
+    setStatus(`正在准备 OCR（${OCR_LANGUAGE_LABELS[workerKey] || "中英混合"}）`);
+    state.ocrWorkerKey = workerKey;
+  }
+  while (state.ocrWorkerPool.length < size) {
+    const worker = await createOcrWorkerInstance(workerKey);
+    if (state.ocrWorkerKey !== workerKey) {
+      // The language switched while this worker loaded; start over.
+      try {
+        await worker.terminate();
+      } catch {
+        // Ignore shutdown failures.
+      }
+      return ensureOcrWorkerPool(size);
+    }
+    state.ocrWorkerPool.push(worker);
+  }
+  return state.ocrWorkerPool;
+}
+
+async function ensureOcrWorker() {
+  const pool = await ensureOcrWorkerPool(1);
+  return pool[0];
+}
+
+// Semaphore over the pool: at most one recognition per worker at a time.
+const ocrWorkerWaiters = [];
+
+async function acquireOcrWorker(concurrency) {
+  for (;;) {
+    const pool = await ensureOcrWorkerPool(concurrency);
+    const worker = pool.find((candidate) => !state.ocrWorkerBusy.has(candidate));
+    if (worker) {
+      state.ocrWorkerBusy.add(worker);
+      return worker;
+    }
+    await new Promise((resolve) => ocrWorkerWaiters.push(resolve));
+  }
+}
+
+function releaseOcrWorker(worker) {
+  state.ocrWorkerBusy.delete(worker);
+  ocrWorkerWaiters.shift()?.();
 }
 
 function maybeNarrowOcrLanguage(text) {
@@ -1907,18 +2010,14 @@ function maybeNarrowOcrLanguage(text) {
 }
 
 async function terminateOcrWorker() {
-  if (!state.ocrWorker) {
-    state.ocrWorkerKey = "";
-    return;
+  const workers = state.ocrWorkerPool.splice(0);
+  state.ocrWorkerBusy = new Set();
+  state.ocrWorkerKey = "";
+  // Wake any acquirers so they rebuild the pool for the new language.
+  while (ocrWorkerWaiters.length) {
+    ocrWorkerWaiters.shift()();
   }
-  try {
-    await state.ocrWorker.terminate();
-  } catch {
-    // Ignore worker shutdown failures.
-  } finally {
-    state.ocrWorker = null;
-    state.ocrWorkerKey = "";
-  }
+  await Promise.allSettled(workers.map((worker) => worker.terminate()));
 }
 
 function finalizeBook(bookData, options = {}) {
