@@ -78,6 +78,56 @@ const MOCK = `(() => {
   if (preview.icon !== "▶") throw new Error("preview must not flip the player into playing state");
   console.log("voice auto-preview OK:", JSON.stringify(preview.last));
 
+  // Tap-to-read: while playing, tapping a sentence continues from it.
+  await page.click("#mini-play");
+  await page.waitForFunction(() => document.getElementById("mini-play").textContent === "⏸", null, { timeout: 10000 });
+  const beforeTap = await page.evaluate(() => (window.__spoken || []).length);
+  await page.click('.reader-sentence[data-sentence-index="2"]');
+  await page.waitForFunction((n) => (window.__spoken || []).length > n, beforeTap, { timeout: 10000 });
+  const tap = await page.evaluate(() => {
+    const target = document.querySelector('.reader-sentence[data-sentence-index="2"]').textContent;
+    const last = window.__spoken[window.__spoken.length - 1].text;
+    return {
+      match: last.includes(target.slice(0, 6)),
+      hint: document.getElementById("speech-state-hint").textContent,
+      artwork: navigator.mediaSession?.metadata?.artwork?.length || 0,
+    };
+  });
+  if (!tap.match) throw new Error("tap-to-read must resume from the tapped sentence");
+  // The tap hint is transient: the resumed utterance's onstart may already
+  // have replaced it with the live 正在朗读 line — both prove the jump worked.
+  if (!tap.hint.includes("已从所点的句子继续朗读") && !tap.hint.includes("正在朗读")) {
+    throw new Error("tap hint: " + tap.hint);
+  }
+  if (tap.artwork < 2) throw new Error("media session artwork missing: " + tap.artwork);
+  console.log("tap-to-read (playing) + artwork OK");
+  await page.click("#stop-button");
+  await page.waitForFunction(() => document.getElementById("mini-play").textContent === "▶", null, { timeout: 5000 });
+
+  // Idle tap only positions the highlight, no speech starts.
+  const idleBefore = await page.evaluate(() => window.__spoken.length);
+  await page.click('.reader-sentence[data-sentence-index="0"]');
+  await page.waitForTimeout(400);
+  const idle = await page.evaluate(() => ({
+    count: window.__spoken.length,
+    active: document.querySelector(".reader-sentence.active")?.dataset.sentenceIndex,
+    hint: document.getElementById("speech-state-hint").textContent,
+  }));
+  if (idle.count !== idleBefore) throw new Error("idle tap must not start speech");
+  if (idle.active !== "0") throw new Error("idle tap must move the highlight, got " + idle.active);
+  if (!idle.hint.includes("已定位到该句")) throw new Error("idle hint: " + idle.hint);
+  console.log("tap-to-read (idle) OK");
+
+  // Keep-awake toggle: default on, persisted when switched off.
+  const awakeDefault = await page.evaluate(() => document.getElementById("keep-awake-toggle").checked);
+  if (!awakeDefault) throw new Error("keep-awake must default to on");
+  await page.click("#keep-awake-toggle");
+  const awakeSaved = await page.evaluate(
+    () => JSON.parse(localStorage.getItem("vivid-reader-settings-v2") || "{}").keepScreenOn,
+  );
+  if (awakeSaved !== false) throw new Error("keep-awake off must persist, got " + awakeSaved);
+  console.log("keep-awake toggle OK");
+
   // Info tap scrolls back to the active sentence.
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
   await page.click("#mini-info");

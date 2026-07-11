@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v33";
+const APP_VERSION = "v34";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -209,6 +209,9 @@ const state = {
   utteranceRefs: [],
   progressSaveTimer: 0,
   fontScale: 100,
+  // Wake Lock is a workaround for devices that kill speech on screen-off;
+  // devices that keep playing can disable it to save battery.
+  keepScreenOn: true,
   toneChosenByUser: false,
   // Incremental read-along highlight (Part B): we track the active elements
   // directly and cache the sentence text so boundary events no longer rebuild
@@ -306,6 +309,7 @@ const dom = {
   onboardingCard: document.getElementById("onboarding-card"),
   onboardingDismiss: document.getElementById("onboarding-dismiss"),
   exportDiagnostics: document.getElementById("export-diagnostics"),
+  keepAwakeToggle: document.getElementById("keep-awake-toggle"),
 };
 
 // Identifies the most recent book load; a background PDF import aborts as soon
@@ -589,6 +593,33 @@ function wireEvents() {
   dom.exportDiagnostics?.addEventListener("click", () => {
     exportDiagnosticsReport();
   });
+  dom.keepAwakeToggle?.addEventListener("change", () => {
+    state.keepScreenOn = Boolean(dom.keepAwakeToggle.checked);
+    saveSettings();
+    if (!state.keepScreenOn) {
+      releaseWakeLock();
+    } else if (state.speaking && !state.paused) {
+      void acquireWakeLock();
+    }
+  });
+  // Tap-to-read: tapping any sentence in the reader jumps there; if speech is
+  // active it continues from that sentence immediately.
+  dom.readerBody?.addEventListener("click", (event) => {
+    const sentence = event.target?.closest?.(".reader-sentence");
+    if (!sentence || !state.book) {
+      return;
+    }
+    if (window.getSelection && String(window.getSelection()).trim()) {
+      return; // The user is selecting text, not tapping to jump.
+    }
+    const index = Number(sentence.dataset.sentenceIndex);
+    if (!Number.isFinite(index)) {
+      return;
+    }
+    const wasActive = isSpeechActive();
+    jumpToSentence(index);
+    dom.speechStateHint.textContent = wasActive ? "已从所点的句子继续朗读" : "已定位到该句，点「开始朗读」从这里播放";
+  });
 
   dom.speakButton.addEventListener("click", () => {
     void startSpeech();
@@ -709,6 +740,7 @@ function hydrateSettings() {
     state.rate = clamp(Number(settings.rate) || state.rate, 0.5, 3.0);
     state.voiceURI = typeof settings.voiceURI === "string" ? settings.voiceURI : state.voiceURI;
     state.fontScale = clamp(Number(settings.fontScale) || state.fontScale, 85, 140);
+    state.keepScreenOn = settings.keepScreenOn !== false;
   } catch {
     // Ignore malformed local settings.
   }
@@ -723,6 +755,7 @@ function saveSettings() {
     rate: state.rate,
     voiceURI: state.voiceURI,
     fontScale: state.fontScale,
+    keepScreenOn: state.keepScreenOn,
   };
   window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload));
 }
@@ -732,6 +765,9 @@ function refreshSpeechControls() {
     dom.rateRange.value = String(state.rate);
   }
   dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
+  if (dom.keepAwakeToggle) {
+    dom.keepAwakeToggle.checked = state.keepScreenOn;
+  }
 }
 
 function renderSpeechDiagnostics(title, text, stateName = "idle") {
@@ -2288,6 +2324,7 @@ function updateSpeechProgress() {
     dom.speechProgressText.textContent = `${Math.round(percent)}%`;
   }
   refreshMiniPlayer();
+  updateMediaSessionPositionState();
 }
 
 // Sticky mini player: keeps play/pause and sentence stepping reachable while
@@ -2397,6 +2434,17 @@ function stepSentence(delta) {
   jumpToSentence(state.currentSentenceIndex + delta);
 }
 
+// Paragraph-level seek that keeps playback going (jumpToParagraph stops it,
+// which suits the position slider but not lock-screen seek buttons).
+function seekParagraphDuringSpeech(delta) {
+  if (!state.book) {
+    return;
+  }
+  const paragraphs = getCurrentParagraphs();
+  const target = clamp(state.currentParagraphIndex + delta, 0, Math.max(0, paragraphs.length - 1));
+  jumpToSentence(state.currentSentenceStarts[target] ?? 0);
+}
+
 function renderJumpButtons(container, totalCount, activeIndex, onJump) {
   container.innerHTML = "";
   if (!totalCount || totalCount <= 1) {
@@ -2456,7 +2504,7 @@ function highlightSentence(index, options = { smooth: true }) {
 }
 
 async function acquireWakeLock() {
-  if (!("wakeLock" in navigator) || state.wakeLockSentinel) {
+  if (!state.keepScreenOn || !("wakeLock" in navigator) || state.wakeLockSentinel) {
     return;
   }
   try {
@@ -2600,6 +2648,13 @@ function onSpeechPlaybackStopped(options = {}) {
   clearBoundaryFallbackTimers();
   stopMediaAnchor();
   setMediaSessionPlaybackState(options.paused ? "paused" : "none");
+  if ("mediaSession" in navigator && typeof navigator.mediaSession.setPositionState === "function") {
+    try {
+      navigator.mediaSession.setPositionState();
+    } catch {
+      // Clearing position state is best-effort.
+    }
+  }
   void persistProgressNow();
   refreshMiniPlayer();
 }
@@ -2625,9 +2680,44 @@ function updateMediaSessionMetadata() {
       title: section?.title || state.book.title,
       artist: state.book.title,
       album: "iStone Reader",
+      artwork: [
+        { src: new URL("./assets/icon-192.png", window.location.href).toString(), sizes: "192x192", type: "image/png" },
+        { src: new URL("./assets/icon-512.png", window.location.href).toString(), sizes: "512x512", type: "image/png" },
+      ],
     });
   } catch {
     // Metadata is a progressive enhancement.
+  }
+}
+
+// Approximate chapter progress for the lock-screen seek bar: char offsets
+// scaled by the calibrated per-char speech speed.
+function updateMediaSessionPositionState() {
+  if (!("mediaSession" in navigator) || typeof navigator.mediaSession.setPositionState !== "function") {
+    return;
+  }
+  const sentences = state.sentenceTexts || [];
+  if (!sentences.length || !state.speaking) {
+    return;
+  }
+  try {
+    const msPerChar = state.speechMsPerCharEwma > 0 ? state.speechMsPerCharEwma : 150;
+    let totalChars = 0;
+    let charsBefore = 0;
+    sentences.forEach((sentence, index) => {
+      totalChars += sentence.length;
+      if (index < state.currentSentenceIndex) {
+        charsBefore += sentence.length;
+      }
+    });
+    const duration = Math.max(1, (totalChars * msPerChar) / 1000);
+    navigator.mediaSession.setPositionState({
+      duration,
+      position: clamp((charsBefore * msPerChar) / 1000, 0, duration),
+      playbackRate: 1,
+    });
+  } catch {
+    // Position state is a progressive enhancement.
   }
 }
 
@@ -2650,6 +2740,14 @@ function registerMediaSessionHandlers() {
     },
     nexttrack: () => {
       stepSentence(1);
+    },
+    // Some platforms render these as ±10s style buttons; paragraph-level
+    // jumps map better to listening than another sentence step.
+    seekbackward: () => {
+      seekParagraphDuringSpeech(-1);
+    },
+    seekforward: () => {
+      seekParagraphDuringSpeech(1);
     },
   };
   Object.entries(handlers).forEach(([action, handler]) => {
