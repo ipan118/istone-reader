@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>隐私政策 · iStone Reader</title>
+    <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0 auto;
+        max-width: 720px;
+        padding: 32px 20px 64px;
+        font-family: -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+        line-height: 1.75;
+        color: #1c2733;
+        background: #f6f8fc;
+      }
+      @media (prefers-color-scheme: dark) {
+        body { color: #dbe4f0; background: #0f172a; }
+        a { color: #7db3ff; }
+      }
+      h1 { font-size: 24px; }
+      h2 { font-size: 17px; margin-top: 28px; }
+      .meta { opacity: 0.7; font-size: 13px; }
+      .highlight {
+        padding: 14px 16px;
+        border-radius: 12px;
+        border: 1px solid rgba(125, 155, 200, 0.35);
+        background: rgba(125, 155, 200, 0.12);
+      }
+      hr { border: 0; border-top: 1px solid rgba(125, 155, 200, 0.35); margin: 36px 0; }
+    </style>
+  </head>
+  <body>
+    <h1>iStone Reader 隐私政策</h1>
+    <p class="meta">生效日期：2026 年 7 月 · 适用于 iStone Reader 网页应用及其应用商店打包版本</p>
+
+    <p class="highlight">
+      一句话概括：<strong>iStone Reader 不收集、不上传、不分享你的任何数据。</strong>
+      你导入的书籍、朗读进度和全部设置只保存在你自己设备的浏览器存储中，应用的解析、扫描识别（OCR）和语音朗读全部在本地完成。
+    </p>
+
+    <h2>我们收集哪些数据</h2>
+    <p>不收集任何数据。应用没有账号系统、没有统计分析、没有广告 SDK、没有崩溃上报，也不设置任何跟踪标识。</p>
+
+    <h2>你的书籍文件如何处理</h2>
+    <p>
+      你导入的 PDF、EPUB、TXT、Markdown 文件在设备本地解析；扫描版 PDF 的文字识别由内置的本地 OCR 引擎完成；
+      朗读使用你设备操作系统或浏览器提供的语音合成能力。<strong>文件内容不会通过网络发送到任何服务器。</strong>
+    </p>
+
+    <h2>本地存储</h2>
+    <p>
+      为了提供书架、断点续听和识别缓存，应用使用浏览器的 IndexedDB 与 localStorage 在你的设备上保存：
+      书籍解析后的文本、阅读进度、语速等偏好设置、扫描识别的分页缓存。
+      这些数据始终留在设备上；在书架中删除书籍或清除浏览器站点数据即可彻底移除。
+      应用会向浏览器申请“持久化存储”权限，仅用于降低上述本地数据被系统自动清理的概率。
+    </p>
+
+    <h2>需要的系统能力</h2>
+    <p>
+      屏幕常亮（Wake Lock）：仅在朗读进行时用于防止部分设备熄屏中断播放；
+      媒体会话：用于在锁屏界面显示播放控制。两者均不涉及数据收集。
+    </p>
+
+    <h2>网络访问</h2>
+    <p>
+      应用作为网页/PWA 分发，首次访问和版本更新时会从托管服务器加载应用自身的程序文件，并缓存到本地以便离线使用。
+      除此之外应用不发起任何网络请求；所有第三方组件（PDF 解析、EPUB 解析、OCR 引擎与语言模型）均随应用本体打包分发，不使用外部 CDN。
+    </p>
+
+    <h2>儿童隐私</h2>
+    <p>应用不收集任何人的任何数据，自然也不收集儿童数据。</p>
+
+    <h2>政策变更与联系方式</h2>
+    <p>
+      若本政策发生变更，将在本页面更新生效日期。任何疑问可通过项目主页提交反馈：
+      <a href="https://github.com/ipan118/istone-reader/issues">github.com/ipan118/istone-reader/issues</a>
+    </p>
+
+    <hr />
+
+    <h2>Privacy Policy (English Summary)</h2>
+    <p>
+      iStone Reader collects <strong>no data whatsoever</strong>. There are no accounts, analytics, ads, or crash
+      reporting. Imported books are parsed, OCR-processed, and read aloud entirely on your device using the system's
+      speech engine; file contents never leave the device. Reading progress and settings live in your browser's local
+      storage (IndexedDB / localStorage) and can be removed by deleting books from the shelf or clearing site data.
+      Wake Lock is used only to keep the screen on during playback, and the Media Session API only powers lock-screen
+      controls. The app fetches nothing over the network except its own application files for updates and offline
+      caching. Questions: <a href="https://github.com/ipan118/istone-reader/issues">GitHub Issues</a>.
+    </p>
+
+    <p><a href="./">← 返回 iStone Reader</a></p>
+  </body>
+</html>

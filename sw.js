@@ -1,10 +1,11 @@
-const CACHE_NAME = "istone-reader-pwa-v32";
+const CACHE_NAME = "istone-reader-pwa-v33";
 const SHARED_BOOK_URL = new URL("./shared-book", self.registration.scope).toString();
 const SHARE_TARGET_PATH = new URL("./share-target", self.registration.scope).pathname;
 const API_PATH_PREFIX = new URL("./api/", self.registration.scope).pathname;
 const CORE_ASSETS = [
   "./",
   "./index.html",
+  "./privacy.html",
   "./styles.css",
   "./app.js",
   "./library.js",
