@@ -54,11 +54,20 @@ const MOCK = `(() => {
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "⏸", null, { timeout: 10000 });
   await page.click("#mini-play"); // pause via the same button
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "▶", null, { timeout: 5000 });
-  await page.click("#mini-play"); // resume
+  // Pause is cancel-based (engine-native resume() locks up on Android): the
+  // synth must actually be cancelled, not engine-paused.
+  const pausedEngine = await page.evaluate(() => ({
+    speaking: window.speechSynthesis.speaking,
+    spoken: window.__spoken.length,
+  }));
+  if (pausedEngine.speaking) throw new Error("pause must cancel the engine, not engine-pause it");
+  await page.click("#mini-play"); // resume restarts from the tracked sentence
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "⏸", null, { timeout: 10000 });
+  const resumedEngine = await page.evaluate(() => window.__spoken.length);
+  if (resumedEngine <= pausedEngine.spoken) throw new Error("resume must speak a fresh utterance");
   await page.click("#stop-button");
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "▶", null, { timeout: 5000 });
-  console.log("play/pause/resume/stop icon OK");
+  console.log("play/pause(cancel-based)/resume/stop OK");
 
   // Idle voice auto-preview: changing the voice while stopped speaks a short
   // sample in the chosen voice without flipping the player into playing state.

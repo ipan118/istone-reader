@@ -60,6 +60,10 @@ bash tests/e2e/run-all.sh
 
 脚本自行启动/清理本地静态服务器；已有 Chromium 时可用 `CHROMIUM_PATH` 指定二进制而免下载。单独运行某一项：先起 `python3 -m http.server 4173 --bind 127.0.0.1`，再 `node tests/e2e/<脚本>.cjs`（可用 `TARGET_URL` 改地址）。`tests/e2e/fixtures/` 里的 PDF 夹具已入库，需重新生成时 `npm install pdf-lib` 后运行 `node tests/e2e/gen-pdfs.cjs`。
 
+## 国内访问说明
+
+`*.vercel.app` 域名在中国大陆经常无法直连。此时应用会以本机缓存版本运行（状态栏提示"无法连接更新服务器 · 正在使用本机缓存版本"），功能可正常使用但收不到更新。根治方式是给 Vercel 项目**绑定自定义域名**（Vercel → 项目 → Settings → Domains，任意注册商的域名即可）：自定义域名通常可从大陆直连；绑定后用新域名访问并重新"添加到主屏幕"。
+
 ## 目录说明
 
 - `app.js` 应用主逻辑（解析调度、朗读、OCR、UI）

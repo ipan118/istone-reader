@@ -150,6 +150,21 @@ const MOCK = `(() => {
     await page.close();
   }
 
+  // --- 4. Unreachable update server is surfaced, not silent ---
+  {
+    const page = await browser.newPage({ viewport: { width: 430, height: 932 } });
+    // Simulate the mainland-China case: the hosting probe cannot connect.
+    await page.route("**/api/update-probe*", (route) => route.abort("connectionfailed"));
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(
+      () => (document.querySelector("#status-chip")?.textContent || "").includes("本机缓存版本"),
+      null,
+      { timeout: 20000 },
+    );
+    console.log("unreachable-server notice OK");
+    await page.close();
+  }
+
   await browser.close();
   console.log("UX verification passed");
 })().catch((error) => {
