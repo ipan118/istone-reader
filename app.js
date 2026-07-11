@@ -8,6 +8,7 @@ import {
   getCachedOcrPage,
   saveCachedOcrPage,
   pruneOcrPageCache,
+  getAllLibraryBooksFull,
 } from "./library.js";
 import {
   splitPlainTextIntoSections,
@@ -39,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v34";
+const APP_VERSION = "v35";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -310,6 +311,8 @@ const dom = {
   onboardingDismiss: document.getElementById("onboarding-dismiss"),
   exportDiagnostics: document.getElementById("export-diagnostics"),
   keepAwakeToggle: document.getElementById("keep-awake-toggle"),
+  exportLibraryButton: document.getElementById("export-library-button"),
+  restoreLibraryInput: document.getElementById("restore-library-input"),
 };
 
 // Identifies the most recent book load; a background PDF import aborts as soon
@@ -592,6 +595,16 @@ function wireEvents() {
   });
   dom.exportDiagnostics?.addEventListener("click", () => {
     exportDiagnosticsReport();
+  });
+  dom.exportLibraryButton?.addEventListener("click", () => {
+    void exportLibraryBackup();
+  });
+  dom.restoreLibraryInput?.addEventListener("change", async (event) => {
+    const [file] = event.target.files ?? [];
+    dom.restoreLibraryInput.value = "";
+    if (file) {
+      await importLibraryBackup(file);
+    }
   });
   dom.keepAwakeToggle?.addEventListener("change", () => {
     state.keepScreenOn = Boolean(dom.keepAwakeToggle.checked);
@@ -2757,6 +2770,89 @@ function registerMediaSessionHandlers() {
       // Some actions are unsupported on certain platforms.
     }
   });
+}
+
+// --- Library backup / restore ---
+// The shelf lives only in this browser's IndexedDB; a backup file is the way
+// to survive a device switch or browser data loss. Format: plain JSON with
+// full book text + progress + global settings. OCR page cache is excluded
+// (re-derivable, large).
+const BACKUP_FORMAT = "istone-reader-backup";
+
+async function exportLibraryBackup() {
+  try {
+    const books = await getAllLibraryBooksFull();
+    if (!books.length) {
+      setStatus("书架是空的，先导入书籍再备份");
+      return;
+    }
+    let settings = null;
+    try {
+      settings = JSON.parse(window.localStorage.getItem(SETTINGS_KEY) || "null");
+    } catch {
+      settings = null;
+    }
+    const payload = {
+      format: BACKUP_FORMAT,
+      version: 1,
+      appVersion: APP_VERSION,
+      exportedAt: new Date().toISOString(),
+      settings,
+      books,
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `istone-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    setStatus(`书架备份已导出（${books.length} 本书）`);
+  } catch (error) {
+    console.error(error);
+    setStatus("备份导出失败");
+  }
+}
+
+async function importLibraryBackup(file) {
+  try {
+    setStatus("正在恢复备份…");
+    const payload = JSON.parse(await file.text());
+    if (payload?.format !== BACKUP_FORMAT || !Array.isArray(payload.books)) {
+      setStatus("这不是 iStone Reader 的备份文件");
+      return;
+    }
+    let restored = 0;
+    for (const book of payload.books) {
+      if (!book?.id || !Array.isArray(book.sections) || !book.sections.length) {
+        continue;
+      }
+      // saveBookToLibrary keeps existing addedAt and merges progress; passing
+      // the backup's own progress restores the reading position.
+      await saveBookToLibrary(book);
+      restored += 1;
+    }
+    if (payload.settings && typeof payload.settings === "object") {
+      try {
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload.settings));
+        hydrateSettings();
+        applyToneFromState();
+        refreshToneControls();
+        refreshSpeechControls();
+        refreshOcrHint();
+        applyFontScale();
+      } catch {
+        // Settings restore is best-effort; books matter more.
+      }
+    }
+    await refreshLibraryUi();
+    setStatus(restored ? `已恢复 ${restored} 本书` : "备份文件里没有可恢复的书");
+  } catch (error) {
+    console.error(error);
+    setStatus("备份恢复失败：文件无法解析");
+  }
 }
 
 // --- First-run onboarding ---
