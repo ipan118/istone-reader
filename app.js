@@ -39,7 +39,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v32";
+const APP_VERSION = "v33";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -303,6 +303,9 @@ const dom = {
   importProgress: document.getElementById("import-progress"),
   importProgressFill: document.getElementById("import-progress-fill"),
   importProgressText: document.getElementById("import-progress-text"),
+  onboardingCard: document.getElementById("onboarding-card"),
+  onboardingDismiss: document.getElementById("onboarding-dismiss"),
+  exportDiagnostics: document.getElementById("export-diagnostics"),
 };
 
 // Identifies the most recent book load; a background PDF import aborts as soon
@@ -355,6 +358,7 @@ async function bootstrap() {
   }
   registerFileLaunchConsumer();
   void importSharedBookIfAvailable();
+  refreshOnboardingCard();
   void pruneOcrPageCache(OCR_PAGE_CACHE_MAX_AGE_MS).catch(() => {});
   // Ask the browser to protect the shelf (books + OCR cache) from automatic
   // storage eviction; best-effort, some browsers grant silently by heuristics.
@@ -578,6 +582,12 @@ function wireEvents() {
   });
   dom.updateToast?.addEventListener("click", () => {
     window.location.reload();
+  });
+  dom.onboardingDismiss?.addEventListener("click", () => {
+    dismissOnboarding();
+  });
+  dom.exportDiagnostics?.addEventListener("click", () => {
+    exportDiagnosticsReport();
   });
 
   dom.speakButton.addEventListener("click", () => {
@@ -1918,6 +1928,8 @@ function finalizeBook(bookData, options = {}) {
 
   if (!state.bookTransient) {
     void persistBookToLibrary();
+    // A real book import means onboarding served its purpose.
+    dismissOnboarding();
   }
 }
 
@@ -2647,6 +2659,63 @@ function registerMediaSessionHandlers() {
       // Some actions are unsupported on certain platforms.
     }
   });
+}
+
+// --- First-run onboarding ---
+const ONBOARDING_KEY = "istone-onboarded-v1";
+
+function refreshOnboardingCard() {
+  if (!dom.onboardingCard) {
+    return;
+  }
+  let seen = false;
+  try {
+    seen = Boolean(localStorage.getItem(ONBOARDING_KEY));
+  } catch {
+    seen = true;
+  }
+  dom.onboardingCard.hidden = seen;
+}
+
+function dismissOnboarding() {
+  try {
+    localStorage.setItem(ONBOARDING_KEY, "1");
+  } catch {
+    // Private-mode storage failures just keep the card for this session.
+  }
+  if (dom.onboardingCard) {
+    dom.onboardingCard.hidden = true;
+  }
+}
+
+// Diagnostics export: a plain-text snapshot the user can attach to a bug
+// report — no data ever leaves the device unless they share the file.
+function exportDiagnosticsReport() {
+  const voices = state.allVoices?.length ? state.allVoices : state.voices || [];
+  const lines = [
+    `iStone Reader 诊断信息 ${APP_VERSION}`,
+    `时间: ${new Date().toISOString()}`,
+    `UA: ${navigator.userAgent}`,
+    `视口: ${window.innerWidth}x${window.innerHeight} 屏幕: ${window.screen?.width}x${window.screen?.height} DPR: ${window.devicePixelRatio}`,
+    `指针: coarse=${window.matchMedia?.("(pointer: coarse)").matches} 在线: ${navigator.onLine}`,
+    `speechSynthesis: ${"speechSynthesis" in window} 可用语音: ${voices.length}`,
+    `前几条语音: ${voices.slice(0, 8).map((voice) => `${voice.name}(${voice.lang})`).join(", ") || "无"}`,
+    `设置: 语速=${state.rate} OCR模式=${state.ocrMode} OCR语言=${state.ocrLanguage} 色调=${state.tonePreset}`,
+    `当前书: ${state.book ? `${state.book.format} · ${state.book.sections.length} 章 · ${state.book.totalCharacters} 字` : "未载入"}`,
+    `播放状态: speaking=${state.speaking} paused=${state.paused} 句=${state.currentSentenceIndex}/${state.renderedSentenceCount}`,
+    `状态栏: ${dom.statusChip?.textContent || ""}`,
+    `自检: ${dom.speechDiagnosticTitle?.textContent || ""} — ${dom.speechDiagnosticText?.textContent || ""}`,
+  ];
+  const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `istone-diagnostics-${APP_VERSION}.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+  setStatus("诊断信息已导出");
 }
 
 // Sleep-timer fade-out. Volume cannot change on an in-flight utterance, so

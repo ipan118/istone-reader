@@ -1,4 +1,5 @@
 {
+  "id": "./",
   "name": "iStone Reader",
   "short_name": "iStone",
   "start_url": "./",
@@ -34,10 +35,19 @@
     {
       "action": "./",
       "accept": {
-        "application/pdf": [".pdf"],
-        "application/epub+zip": [".epub"],
-        "text/plain": [".txt"],
-        "text/markdown": [".md", ".markdown"]
+        "application/pdf": [
+          ".pdf"
+        ],
+        "application/epub+zip": [
+          ".epub"
+        ],
+        "text/plain": [
+          ".txt"
+        ],
+        "text/markdown": [
+          ".md",
+          ".markdown"
+        ]
       }
     }
   ],

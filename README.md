@@ -66,5 +66,8 @@ bash tests/e2e/run-all.sh
 - `text-pipeline.mjs` 文本管线（分章、分句、段落重排、OCR 文本修复、引用剥离、章节规整；纯函数，浏览器与 Node 通用）
 - `tests/` 文本管线回归测试（`node --test`）
 - `library.js` 本机书架与进度持久化（IndexedDB）
+- `privacy.html` 隐私政策页（零收集声明，商店上架必备）
+- `docs/` Google Play TWA 上架指南与商店文案
+- `.well-known/assetlinks.json` TWA 数字资产链接（上架时回填签名指纹）
 - `sw.js` Service Worker（离线缓存与分享导入）
 - `vendor/` 本地依赖：pdf.js、epub.js、jszip、Tesseract（含 `tessdata/` 中英文识别模型）

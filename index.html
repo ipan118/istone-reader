@@ -61,6 +61,18 @@
         </div>
       </section>
 
+      <section class="glass-card onboarding-card" id="onboarding-card" hidden>
+        <div class="onboarding-head">
+          <strong>三步开始听书</strong>
+          <button class="ghost-button" id="onboarding-dismiss" type="button">知道了</button>
+        </div>
+        <ol class="onboarding-steps">
+          <li>点「导入书籍」选择 PDF / EPUB / TXT——扫描版 PDF 也可以，会自动识别文字。</li>
+          <li>在「朗读控制」里挑一个顺耳的声音，选中即自动试听一句。</li>
+          <li>点「开始朗读」。锁屏后播放继续，锁屏控制条可暂停、切句。</li>
+        </ol>
+      </section>
+
       <section class="control-grid">
         <article class="glass-card panel-card book-card">
           <div class="panel-heading">
@@ -166,6 +178,7 @@
           <div class="speech-diagnostic" id="speech-diagnostic" data-state="idle">
             <strong id="speech-diagnostic-title">朗读自检：待测试</strong>
             <p id="speech-diagnostic-text">如果没声音，这里会告诉你是浏览器限制、系统语音缺失，还是设备静音。</p>
+            <button class="ghost-button diagnostic-export-button" id="export-diagnostics" type="button">导出诊断信息</button>
           </div>
         </article>
 
@@ -333,6 +346,7 @@
         </div>
 
         <p class="help-footnote">遇到其他问题，可以先点「测试发声」和「加载演示书」排查是设备问题还是文件问题。</p>
+        <p class="help-footnote">所有数据仅保存在本机，应用不收集任何信息 · <a href="./privacy.html" id="privacy-link">隐私政策</a></p>
       </section>
     </main>
 

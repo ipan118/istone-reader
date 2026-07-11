@@ -376,6 +376,42 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* --- First-run onboarding --- */
+.onboarding-card {
+  padding: 16px 18px;
+  display: grid;
+  gap: 10px;
+}
+
+.onboarding-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.onboarding-head strong {
+  font-size: 15px;
+}
+
+.onboarding-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.diagnostic-export-button {
+  margin-top: 10px;
+  font-size: 12px;
+}
+
+.help-footnote a {
+  color: var(--accent-primary);
+}
+
 /* --- Import progress (scanned PDF parsing) --- */
 .import-progress {
   display: grid;

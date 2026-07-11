@@ -99,6 +99,57 @@ const MOCK = `(() => {
     await page.close();
   }
 
+  // --- 3. Store-compliance surface: privacy page, onboarding, diagnostics ---
+  {
+    const page = await browser.newPage({ viewport: { width: 430, height: 932 } });
+    page.on("pageerror", (e) => { console.error("PAGEERROR", e.message); process.exitCode = 1; });
+
+    // Privacy policy page exists and states zero collection.
+    const response = await page.goto(new URL("./privacy.html", targetUrl).toString(), { waitUntil: "domcontentloaded" });
+    assert.equal(response.status(), 200, "privacy.html must be served");
+    const privacyText = await page.evaluate(() => document.body.textContent);
+    assert.ok(privacyText.includes("不收集"), "privacy page must state zero collection");
+    assert.ok(/no data whatsoever/i.test(privacyText), "privacy page must include the English summary");
+
+    // Onboarding card shows on first visit and the app links to the policy.
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".reader-sentence", { timeout: 15000 });
+    const firstVisit = await page.evaluate(() => ({
+      onboarding: !document.getElementById("onboarding-card").hidden,
+      privacyLink: Boolean(document.querySelector('a[href="./privacy.html"]')),
+    }));
+    assert.equal(firstVisit.onboarding, true, "onboarding must show on first visit");
+    assert.equal(firstVisit.privacyLink, true, "app must link to the privacy policy");
+
+    // Dismiss persists across reloads.
+    await page.click("#onboarding-dismiss");
+    assert.equal(
+      await page.evaluate(() => document.getElementById("onboarding-card").hidden),
+      true,
+      "onboarding must hide on dismiss",
+    );
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".reader-sentence", { timeout: 15000 });
+    assert.equal(
+      await page.evaluate(() => document.getElementById("onboarding-card").hidden),
+      true,
+      "onboarding must stay dismissed after reload",
+    );
+
+    // Diagnostics export downloads a text snapshot mentioning the build tag.
+    const [download] = await Promise.all([
+      page.waitForEvent("download", { timeout: 10000 }),
+      page.click("#export-diagnostics"),
+    ]);
+    assert.ok(/istone-diagnostics-v\d+\.txt/.test(download.suggestedFilename()), download.suggestedFilename());
+    const diagPath = await download.path();
+    const diagText = require("node:fs").readFileSync(diagPath, "utf-8");
+    assert.ok(/iStone Reader 诊断信息 v\d+/.test(diagText), "diagnostics must include the build tag");
+    assert.ok(diagText.includes("speechSynthesis:"), "diagnostics must include speech capability info");
+    console.log("compliance surface OK: privacy page, onboarding lifecycle, diagnostics export");
+    await page.close();
+  }
+
   await browser.close();
   console.log("UX verification passed");
 })().catch((error) => {
