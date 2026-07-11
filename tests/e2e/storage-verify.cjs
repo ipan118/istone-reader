@@ -140,6 +140,45 @@ const sampleTxt = path.join(__dirname, "..", "..", "sample-books", "aurora-demo.
   assert.equal(rateB, "1.0x", `book B must restore 1.0x, got ${rateB}`);
   console.log(`per-book rate memory OK: A=${rateA}, B=${rateB}`);
 
+  // --- Backup / restore roundtrip ---
+  const [backupDownload] = await Promise.all([
+    page.waitForEvent("download", { timeout: 10000 }),
+    page.click("#export-library-button"),
+  ]);
+  const backupPath = await backupDownload.path();
+  const backup = JSON.parse(require("node:fs").readFileSync(backupPath, "utf-8"));
+  assert.equal(backup.format, "istone-reader-backup");
+  assert.equal(backup.books.length, 2, `backup must contain both books, got ${backup.books.length}`);
+  const backupA = backup.books.find((book) => book.title === "迁移测试书");
+  assert.ok(backupA.sections.length >= 1 && backupA.progress?.rate === 1.7, "backup must carry text and progress");
+
+  // Delete book A, then restore it from the backup file.
+  await page.evaluate(() => {
+    const item = [...document.querySelectorAll(".library-item")].find((li) =>
+      li.querySelector("strong")?.textContent.includes("迁移测试书"),
+    );
+    item.querySelector(".library-delete-button").click();
+  });
+  await page.waitForFunction(
+    () => ![...document.querySelectorAll(".library-item-info strong")].some((n) => n.textContent.includes("迁移测试书")),
+    null,
+    { timeout: 10000 },
+  );
+  await page.setInputFiles("#restore-library-input", backupPath);
+  await page.waitForFunction(
+    () => document.querySelector("#status-chip")?.textContent?.includes("已恢复"),
+    null,
+    { timeout: 15000 },
+  );
+  await page.waitForFunction(
+    () => [...document.querySelectorAll(".library-item-info strong")].some((n) => n.textContent.includes("迁移测试书")),
+    null,
+    { timeout: 10000 },
+  );
+  const rateARestored = await openFromShelf("迁移测试书");
+  assert.equal(rateARestored, "1.7x", `restored book A must keep its 1.7x rate, got ${rateARestored}`);
+  console.log("backup/restore roundtrip OK: delete -> restore -> text and rate intact");
+
   await browser.close();
   console.log("Storage v3 verification passed");
 })().catch((error) => {

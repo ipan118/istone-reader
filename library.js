@@ -175,6 +175,18 @@ export async function listLibraryBooks() {
     .sort((left, right) => (right.lastOpenedAt || 0) - (left.lastOpenedAt || 0));
 }
 
+// Full snapshot (metadata + section text) for backup export.
+export async function getAllLibraryBooksFull() {
+  return runStoresTransaction("readonly", [STORE_BOOKS, STORE_BOOK_CONTENTS], (transaction) => {
+    const metaRequest = transaction.objectStore(STORE_BOOKS).getAll();
+    const contentRequest = transaction.objectStore(STORE_BOOK_CONTENTS).getAll();
+    return () => {
+      const contents = new Map((contentRequest.result || []).map((record) => [record.id, record.sections]));
+      return (metaRequest.result || []).map((meta) => ({ ...meta, sections: contents.get(meta.id) || [] }));
+    };
+  });
+}
+
 export async function deleteLibraryBook(id) {
   if (!id) {
     return;

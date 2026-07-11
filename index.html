@@ -127,6 +127,11 @@
               <span>导入过的书自动保存，附带听读进度</span>
             </div>
             <ul class="library-list" id="library-list"></ul>
+            <div class="library-backup-row">
+              <button class="ghost-button" id="export-library-button" type="button">备份书架</button>
+              <label class="ghost-button" for="restore-library-input">恢复备份</label>
+              <input id="restore-library-input" class="visually-hidden" type="file" accept=".json,application/json" />
+            </div>
           </div>
         </article>
 

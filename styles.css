@@ -376,6 +376,16 @@ button {
   overflow-wrap: anywhere;
 }
 
+.library-backup-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.library-backup-row .ghost-button {
+  font-size: 12px;
+}
+
 /* Tap-to-read affordance */
 .reader-sentence {
   cursor: pointer;
