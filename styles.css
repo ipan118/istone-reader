@@ -376,6 +376,30 @@ button {
   overflow-wrap: anywhere;
 }
 
+/* Tap-to-read affordance */
+.reader-sentence {
+  cursor: pointer;
+}
+
+.keep-awake-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.keep-awake-toggle input {
+  margin-top: 3px;
+  accent-color: var(--accent-primary);
+}
+
+.keep-awake-toggle small {
+  display: block;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
 /* --- First-run onboarding --- */
 .onboarding-card {
   padding: 16px 18px;
