@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v36";
+const APP_VERSION = "v37";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -204,6 +204,9 @@ const state = {
   awaitingMoreSections: false,
   // Live import progress: { done, total, avgPageMs } or null when idle.
   importProgress: null,
+  // null = not probed yet; false = hosting unreachable (e.g. vercel.app from
+  // mainland China without a VPN) and the SW is serving the cached build.
+  updateServerReachable: null,
   wakeLockSentinel: null,
   keepAliveTimer: 0,
   mediaAnchorAudio: null,
@@ -369,6 +372,7 @@ async function bootstrap() {
   registerFileLaunchConsumer();
   void importSharedBookIfAvailable();
   refreshOnboardingCard();
+  void checkUpdateServerReachability();
   void pruneOcrPageCache(OCR_PAGE_CACHE_MAX_AGE_MS).catch(() => {});
   // Ask the browser to protect the shelf (books + OCR cache) from automatic
   // storage eviction; best-effort, some browsers grant silently by heuristics.
@@ -834,21 +838,15 @@ function applyRateChangeDuringPlayback() {
   requestSpeechRestart(`语速已调整为 ${state.rate.toFixed(1)}x，正在应用到当前句`, SPEECH_RESTART_DEBOUNCE_MS);
 }
 
-function requestSpeechRestart(message, delayMs = SPEECH_RESTART_DEBOUNCE_MS) {
-  if (!state.book) {
-    return;
-  }
-  const sentences = getCurrentSentences();
-  if (!sentences.length) {
-    return;
-  }
-
-  const maxIndex = Math.max(0, sentences.length - 1);
+// Many voices (notably Chinese ones on Android) never fire boundary events,
+// so currentSentenceIndex may still point at the start of the in-flight
+// speech unit. Estimate real progress from elapsed time so pause/restart
+// resumes at the sentence being read instead of replaying the whole unit.
+// Adopts the refined position and drops the unit snapshot, so chained calls
+// before a new utterance starts continue from here.
+function refineCurrentSentenceFromElapsed() {
+  const maxIndex = Math.max(0, (state.renderedSentenceCount || 1) - 1);
   let sentenceIndex = clamp(state.currentSentenceIndex, 0, maxIndex);
-  // Many voices (notably Chinese ones on Android) never fire boundary events,
-  // so currentSentenceIndex may still point at the start of the in-flight
-  // unit. Estimate real progress from elapsed time so the restart resumes at
-  // the sentence being read instead of replaying the whole unit.
   if (state.activeUnitStartedAt && state.activeUnitMsPerChar > 0 && Array.isArray(state.activeUnitBoundaries)) {
     const progressedChars = (Date.now() - state.activeUnitStartedAt) / state.activeUnitMsPerChar;
     let estimated = sentenceIndex;
@@ -859,11 +857,22 @@ function requestSpeechRestart(message, delayMs = SPEECH_RESTART_DEBOUNCE_MS) {
     });
     sentenceIndex = clamp(Math.max(sentenceIndex, estimated), 0, maxIndex);
   }
-  // Adopt the refined position and drop the (now cancelled) unit snapshot so
-  // a follow-up restart before the new utterance starts chains from here.
   state.currentSentenceIndex = sentenceIndex;
   state.activeUnitStartedAt = 0;
   state.activeUnitBoundaries = null;
+  return sentenceIndex;
+}
+
+function requestSpeechRestart(message, delayMs = SPEECH_RESTART_DEBOUNCE_MS) {
+  if (!state.book) {
+    return;
+  }
+  const sentences = getCurrentSentences();
+  if (!sentences.length) {
+    return;
+  }
+
+  const sentenceIndex = refineCurrentSentenceFromElapsed();
   state.speechAttemptNonce += 1;
   state.speaking = true;
   state.paused = false;
@@ -2871,6 +2880,28 @@ function registerMediaSessionHandlers() {
   });
 }
 
+// The hosting domain (*.vercel.app) is often unreachable from mainland China
+// without a VPN; the service worker then silently serves the cached build and
+// "刷新没反应" looks like a bug. Probe through ./api/* — the SW passes that
+// path straight to the network with no cache fallback, so a failure means the
+// server is genuinely unreachable (any HTTP status, even 404, means it IS
+// reachable) — and say so in the status chip.
+async function checkUpdateServerReachability() {
+  if (!navigator.onLine) {
+    return;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
+    await fetch("./api/update-probe", { cache: "no-store", signal: controller.signal });
+    window.clearTimeout(timer);
+    state.updateServerReachable = true;
+  } catch {
+    state.updateServerReachable = false;
+    setStatus(`无法连接更新服务器 · 正在使用本机缓存版本 ${APP_VERSION}`);
+  }
+}
+
 // --- Library backup / restore ---
 // The shelf lives only in this browser's IndexedDB; a backup file is the way
 // to survive a device switch or browser data loss. Format: plain JSON with
@@ -2990,7 +3021,7 @@ function exportDiagnosticsReport() {
     `时间: ${new Date().toISOString()}`,
     `UA: ${navigator.userAgent}`,
     `视口: ${window.innerWidth}x${window.innerHeight} 屏幕: ${window.screen?.width}x${window.screen?.height} DPR: ${window.devicePixelRatio}`,
-    `指针: coarse=${window.matchMedia?.("(pointer: coarse)").matches} 在线: ${navigator.onLine}`,
+    `指针: coarse=${window.matchMedia?.("(pointer: coarse)").matches} 在线: ${navigator.onLine} 更新服务器可达: ${state.updateServerReachable}`,
     `speechSynthesis: ${"speechSynthesis" in window} 可用语音: ${voices.length}`,
     `前几条语音: ${voices.slice(0, 8).map((voice) => `${voice.name}(${voice.lang})`).join(", ") || "无"}`,
     `设置: 语速=${state.rate} OCR模式=${state.ocrMode} OCR语言=${state.ocrLanguage} 色调=${state.tonePreset}`,
@@ -4334,15 +4365,9 @@ async function startSpeech() {
     onSpeechPlaybackStarted();
     return;
   }
-  if (state.paused && "speechSynthesis" in window && (window.speechSynthesis.paused || window.speechSynthesis.speaking)) {
-    window.speechSynthesis.resume();
-    state.paused = false;
-    state.speaking = true;
-    dom.speechStateHint.textContent = "朗读已继续";
-    onSpeechPlaybackStarted();
-    return;
-  }
-
+  // Note: no engine-native resume() here — pause is cancel-based (Android's
+  // resume() locks up silently), so resuming always restarts from the tracked
+  // sentence below.
   await waitForVoices();
   state.speaking = true;
   state.paused = false;
@@ -4601,20 +4626,32 @@ async function togglePause() {
     return;
   }
 
-  if (!("speechSynthesis" in window) || (!window.speechSynthesis.speaking && !window.speechSynthesis.paused)) {
+  if (!("speechSynthesis" in window)) {
     return;
   }
-  if (window.speechSynthesis.paused) {
-    window.speechSynthesis.resume();
+
+  // Engine-native pause()/resume() silently locks up on Android after longer
+  // pauses (the engine claims to be speaking but produces no audio). Pause is
+  // therefore implemented as cancel-and-remember: the elapsed-time estimate
+  // pins the sentence being spoken, and resume restarts from it — replaying a
+  // few words beats a dead player.
+  if (state.paused) {
     state.paused = false;
-    state.speaking = true;
     dom.speechStateHint.textContent = "朗读已继续";
-    onSpeechPlaybackStarted();
-  } else {
-    window.speechSynthesis.pause();
-    state.paused = true;
+    await restartChapterSpeechFromIndex(clamp(state.currentSentenceIndex, 0, Math.max(0, state.renderedSentenceCount - 1)));
+    return;
+  }
+
+  if (state.speaking || window.speechSynthesis.speaking || window.speechSynthesis.pending) {
+    refineCurrentSentenceFromElapsed();
+    state.speechAttemptNonce += 1;
+    state.utteranceRefs = [];
+    clearBoundaryFallbackTimers();
+    window.speechSynthesis.cancel();
+    state.activeUtterance = null;
     state.speaking = false;
-    dom.speechStateHint.textContent = "朗读已暂停";
+    state.paused = true;
+    dom.speechStateHint.textContent = "朗读已暂停，继续时从当前句接着读";
     onSpeechPlaybackStopped({ paused: true });
   }
 }
