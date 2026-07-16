@@ -137,6 +137,15 @@ const MOCK = `(() => {
   if (awakeSaved !== false) throw new Error("keep-awake off must persist, got " + awakeSaved);
   console.log("keep-awake toggle OK");
 
+  // Chapter stepping from the bar (idle: position moves, no speech starts).
+  await page.click("#mini-next-chapter");
+  const chapAfter = await page.evaluate(() => document.getElementById("mini-progress").textContent);
+  if (!chapAfter.includes("第 3/5 章")) throw new Error("mini-next-chapter: " + chapAfter);
+  await page.click("#mini-prev-chapter");
+  const chapBack = await page.evaluate(() => document.getElementById("mini-progress").textContent);
+  if (!chapBack.includes("第 2/5 章")) throw new Error("mini-prev-chapter: " + chapBack);
+  console.log("chapter stepping OK");
+
   // Info tap scrolls back to the active sentence.
   await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
   await page.click("#mini-info");

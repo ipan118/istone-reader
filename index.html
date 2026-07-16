@@ -179,6 +179,8 @@
             <button class="ghost-button" id="stop-button" type="button">停止</button>
             <button class="ghost-button" id="prev-sentence-button" type="button">上一句</button>
             <button class="ghost-button" id="next-sentence-button" type="button">下一句</button>
+            <button class="ghost-button" id="prev-chapter-button" type="button">上一章</button>
+            <button class="ghost-button" id="next-chapter-button" type="button">下一章</button>
             <button class="ghost-button" id="voice-test-button" type="button">测试发声</button>
           </div>
           <p class="helper-text" id="voice-hint">
@@ -390,9 +392,11 @@
     <button class="update-toast" id="update-toast" type="button" hidden>新版本已就绪 · 点击刷新</button>
 
     <div class="mini-player" id="mini-player" hidden>
+      <button class="mini-button mini-chapter" id="mini-prev-chapter" type="button" aria-label="上一章">上章</button>
       <button class="mini-button" id="mini-prev" type="button" aria-label="上一句">⏮</button>
       <button class="mini-button mini-play" id="mini-play" type="button" aria-label="播放或暂停">▶</button>
       <button class="mini-button" id="mini-next" type="button" aria-label="下一句">⏭</button>
+      <button class="mini-button mini-chapter" id="mini-next-chapter" type="button" aria-label="下一章">下章</button>
       <button class="mini-info" id="mini-info" type="button" aria-label="回到正在朗读的位置">
         <strong id="mini-title">未开始朗读</strong>
         <span id="mini-progress"></span>

@@ -519,6 +519,12 @@ body.has-mini-player {
   font-size: 20px;
 }
 
+.mini-button.mini-chapter {
+  width: 38px;
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
 .mini-info {
   flex: 1 1 auto;
   min-width: 0;

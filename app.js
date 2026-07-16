@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v37";
+const APP_VERSION = "v38";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -306,6 +306,10 @@ const dom = {
   miniPlay: document.getElementById("mini-play"),
   miniPrev: document.getElementById("mini-prev"),
   miniNext: document.getElementById("mini-next"),
+  miniPrevChapter: document.getElementById("mini-prev-chapter"),
+  miniNextChapter: document.getElementById("mini-next-chapter"),
+  prevChapterButton: document.getElementById("prev-chapter-button"),
+  nextChapterButton: document.getElementById("next-chapter-button"),
   miniInfo: document.getElementById("mini-info"),
   miniTitle: document.getElementById("mini-title"),
   miniProgress: document.getElementById("mini-progress"),
@@ -589,6 +593,18 @@ function wireEvents() {
   });
   dom.miniNext?.addEventListener("click", () => {
     stepSentence(1);
+  });
+  dom.miniPrevChapter?.addEventListener("click", () => {
+    stepChapter(-1);
+  });
+  dom.miniNextChapter?.addEventListener("click", () => {
+    stepChapter(1);
+  });
+  dom.prevChapterButton?.addEventListener("click", () => {
+    stepChapter(-1);
+  });
+  dom.nextChapterButton?.addEventListener("click", () => {
+    stepChapter(1);
   });
   dom.miniInfo?.addEventListener("click", () => {
     const target = state.activeSentenceEl || state.sentenceElByIndex.get(state.currentSentenceIndex) || dom.readerBody;
@@ -2564,6 +2580,23 @@ function seekParagraphDuringSpeech(delta) {
   const paragraphs = getCurrentParagraphs();
   const target = clamp(state.currentParagraphIndex + delta, 0, Math.max(0, paragraphs.length - 1));
   jumpToSentence(state.currentSentenceStarts[target] ?? 0);
+}
+
+// Chapter stepping: jumps to the neighbouring section's start; if speech was
+// running it continues there without an extra tap.
+function stepChapter(delta) {
+  if (!state.book) {
+    return;
+  }
+  const target = clamp(state.currentSectionIndex + delta, 0, state.book.sections.length - 1);
+  if (target === state.currentSectionIndex) {
+    return;
+  }
+  const wasPlaying = state.speaking && !state.paused;
+  setCurrentSection(target, { stopSpeaking: true, resetParagraph: true, resetSentence: true });
+  if (wasPlaying) {
+    void startSpeech();
+  }
 }
 
 function renderJumpButtons(container, totalCount, activeIndex, onJump) {
