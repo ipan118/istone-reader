@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v38";
+const APP_VERSION = "v39";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -54,24 +54,25 @@ const OCR_LANGUAGE_LABELS = {
   eng: "英文",
 };
 
+// 「声浪」配色：红是唯一的主操作色，青只做小面积状态指示。
 const TONE_PRESETS = {
   dark: {
     label: "暗色",
-    accentPrimary: "#0a84ff",
-    accentSecondary: "#82c7ff",
-    accentTertiary: "#3b82f6",
-    accentQuaternary: "#1d4ed8",
-    accentAux: "#d8ecff",
-    backgroundStops: ["#0b1120", "#111827", "#0f172a"],
+    accentPrimary: "#fe2c55",
+    accentSecondary: "#ff6b8a",
+    accentTertiary: "#e0234a",
+    accentQuaternary: "#c81e42",
+    accentAux: "#25f4ee",
+    backgroundStops: ["#15151d", "#000000", "#000000"],
   },
   light: {
     label: "浅色",
-    accentPrimary: "#0a6dd8",
-    accentSecondary: "#5ea2ff",
-    accentTertiary: "#8bbcff",
-    accentQuaternary: "#2563eb",
-    accentAux: "#d7e8ff",
-    backgroundStops: ["#f6f8fc", "#eaf0f8", "#dde6f3"],
+    accentPrimary: "#e82550",
+    accentSecondary: "#ff6b8a",
+    accentTertiary: "#c81e42",
+    accentQuaternary: "#a81a38",
+    accentAux: "#0ab8b2",
+    backgroundStops: ["#f7f7f9", "#f1f1f5", "#f1f1f5"],
   },
 };
 
@@ -931,13 +932,13 @@ function applyToneFromState() {
   root.setProperty("--accent-tertiary", preset.accentTertiary);
   root.setProperty("--accent-quaternary", preset.accentQuaternary);
   root.setProperty("--accent-aux", preset.accentAux);
-  root.setProperty("--panel-top", isLight ? "rgba(255, 255, 255, 0.96)" : "rgba(22, 28, 39, 0.96)");
-  root.setProperty("--panel-bottom", isLight ? "rgba(247, 249, 252, 0.96)" : "rgba(15, 23, 42, 0.96)");
+  root.setProperty("--panel-top", isLight ? "rgba(255, 255, 255, 0.97)" : "rgba(18, 18, 24, 0.96)");
+  root.setProperty("--panel-bottom", isLight ? "rgba(246, 246, 248, 0.97)" : "rgba(10, 10, 14, 0.96)");
   root.setProperty(
     "--body-background",
     isLight
-      ? "linear-gradient(180deg, #eef3f8 0%, #f8fafc 42%, #edf2f7 100%)"
-      : "linear-gradient(180deg, #111827 0%, #0f172a 100%)",
+      ? "linear-gradient(180deg, #f7f7f9 0%, #f1f1f5 100%)"
+      : "radial-gradient(120% 34% at 50% 0%, #15151d 0%, #000000 60%)",
   );
   root.setProperty("--button-gradient", `linear-gradient(135deg, ${preset.accentPrimary}, ${preset.accentTertiary})`);
   root.setProperty("--button-shadow", `0 14px 30px ${rgbaFromHex(preset.accentPrimary, 0.28)}`);
@@ -961,7 +962,7 @@ function applyToneFromState() {
   root.setProperty("--active-outline", rgbaFromHex(preset.accentSecondary, 0.46));
   root.setProperty("--active-surface", rgbaFromHex(preset.accentSecondary, 0.08));
   if (dom.themeMeta) {
-    dom.themeMeta.setAttribute("content", isLight ? "#f6f8fc" : "#111827");
+    dom.themeMeta.setAttribute("content", isLight ? "#f7f7f9" : "#000000");
   }
 }
 
