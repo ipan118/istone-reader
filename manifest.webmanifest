@@ -5,8 +5,8 @@
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f6f8fc",
-  "theme_color": "#f6f8fc",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "description": "导入 PDF、EPUB、TXT、MD 后进行听读、导航和本地语音朗读的轻量阅读器。",
   "share_target": {
     "action": "./share-target",
