@@ -10,7 +10,7 @@ const MOCK = `(() => {
     onvoiceschanged:null,
     speak(u){ this._q.push(u); this.pending=true; this._pump(); },
     _pump(){ if(this._cur||!this._q.length) return; const u=this._q.shift(); this._cur=u; this.speaking=true;
-      (window.__spoken = window.__spoken || []).push({ text: u.text, voice: u.voice && u.voice.name });
+      (window.__spoken = window.__spoken || []).push({ text: u.text, voice: u.voice && u.voice.name, pitch: u.pitch, rate: u.rate });
       this.pending=this._q.length>0; const ms=25+(u.text||"").length*(30/(u.rate||1));
       this._t.push(setTimeout(()=>{ u.onstart&&u.onstart({charIndex:0});
         this._t.push(setTimeout(()=>{ if(this._cur!==u) return; this._cur=null; this.speaking=this._q.length>0; u.onend&&u.onend({}); this._pump(); }, ms)); },15)); },
@@ -101,6 +101,25 @@ const MOCK = `(() => {
   if (!/iStone Reader/.test(preview.last.text)) throw new Error("preview sample text: " + preview.last.text);
   if (preview.icon !== "▶") throw new Error("preview must not flip the player into playing state");
   console.log("voice auto-preview OK:", JSON.stringify(preview.last));
+
+  // Voice style: switching to 低沉 previews immediately with the derived
+  // pitch (0.7) and persists; the default 标准 keeps natural pitch 1.
+  const styleBefore = await page.evaluate(() => window.__spoken.length);
+  await page.selectOption("#voice-style-select", "deep");
+  await page.waitForFunction((n) => (window.__spoken || []).length > n, styleBefore, { timeout: 10000 });
+  const styleSample = await page.evaluate(() => ({
+    last: window.__spoken[window.__spoken.length - 1],
+    saved: JSON.parse(localStorage.getItem("vivid-reader-settings-v2") || "{}").voiceStyle,
+    icon: document.getElementById("mini-play").textContent,
+  }));
+  if (Math.abs(styleSample.last.pitch - 0.7) > 0.001) throw new Error("deep style pitch: " + JSON.stringify(styleSample.last));
+  if (styleSample.saved !== "deep") throw new Error("voice style must persist, got " + styleSample.saved);
+  if (styleSample.icon !== "▶") throw new Error("style preview must not flip the player into playing state");
+  await page.selectOption("#voice-style-select", "standard");
+  await page.waitForTimeout(400);
+  const standardPitch = await page.evaluate(() => window.__spoken[window.__spoken.length - 1].pitch);
+  if (standardPitch !== 1) throw new Error("standard style must keep pitch 1, got " + standardPitch);
+  console.log("voice style presets OK:", JSON.stringify(styleSample.last));
 
   // Tap-to-read: while playing, tapping a sentence continues from it.
   await page.click("#mini-play");
