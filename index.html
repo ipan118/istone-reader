@@ -182,6 +182,20 @@
               <span>朗读时保持屏幕常亮<small>你的设备若熄屏也能继续播放，可关闭以省电</small></span>
             </label>
           </div>
+          <div class="neural-pack-block" id="neural-pack-block">
+            <div class="block-heading">
+              <strong>神经语音包（试验）</strong>
+              <span>导入后获得真人感男声/女声，合成全程在本机、不联网</span>
+            </div>
+            <ul class="neural-pack-list" id="neural-pack-list"></ul>
+            <div class="neural-pack-actions">
+              <label class="ghost-button" for="neural-pack-input">导入语音包（.zip）</label>
+              <input id="neural-pack-input" class="visually-hidden" type="file" accept=".zip,application/zip" />
+            </div>
+            <p class="helper-text" id="neural-pack-hint">
+              语音包内含合成引擎和音色模型（几十到上百 MB），只保存在本机。语音包会在本机执行代码，请只导入可信来源的语音包。
+            </p>
+          </div>
           <div class="control-button-row">
             <button class="primary-button" id="speak-button" type="button">开始朗读</button>
             <button class="ghost-button" id="pause-button" type="button">暂停 / 继续</button>
@@ -354,6 +368,10 @@
           <details>
             <summary>怎么导入微信里收到的文件？</summary>
             <p>微信聊天文件需要先保存出来再导入：安卓在微信里打开文件 → 「···」→「保存到手机」，然后在系统文件管理的「Download/WeiXin」里把文件「分享」给 iStone Reader（需先安装到主屏幕）；iPhone 在微信里选「用其他应用打开 → 存储到"文件"」，再用「导入书籍」从"文件"里选取。点顶部「导入微信文件」按钮可查看带步骤的完整指引。</p>
+          </details>
+          <details>
+            <summary>什么是神经语音包？怎么获得真男声/女声？</summary>
+            <p>手机系统只提供一个声音时，可以在「朗读控制 → 神经语音包」里导入 .zip 语音包，获得真人感的男声/女声——语音包内含开源合成引擎和音色模型，导入后合成全程在你的手机本机完成，不联网。语音包体积较大（几十到上百 MB），只需导入一次，会保存在本机。注意：语音包会在本机执行其中的引擎代码，请只导入可信来源发布的语音包。官方整理的语音包获取方式会在项目主页提供。</p>
           </details>
           <details>
             <summary>我的书和进度存在哪里？会上传吗？</summary>
