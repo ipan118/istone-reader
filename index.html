@@ -184,7 +184,7 @@
             <button class="ghost-button" id="voice-test-button" type="button">测试发声</button>
           </div>
           <p class="helper-text" id="voice-hint">
-            语音来自设备系统。不同手机或浏览器看到的可选声音会不同。
+            语音全部使用设备本机的系统声线，朗读不联网。不同手机或浏览器看到的可选声音会不同。
           </p>
           <div class="speech-diagnostic" id="speech-diagnostic" data-state="idle">
             <strong id="speech-diagnostic-title">朗读自检：待测试</strong>
@@ -390,6 +390,21 @@
     </dialog>
 
     <button class="update-toast" id="update-toast" type="button" hidden>新版本已就绪 · 点击刷新</button>
+
+    <nav class="tab-bar" id="tab-bar" aria-label="快速导航">
+      <button class="tab-item active" id="tab-shelf" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v9H4zM13 4h7v5h-7zM13 11h7v9h-7zM4 15h7v5H4z" /></svg>
+        <span>书架</span>
+      </button>
+      <button class="tab-item tab-import" id="tab-import" type="button">
+        <span class="tab-create" aria-hidden="true"><span>＋</span></span>
+        <span>导入</span>
+      </button>
+      <button class="tab-item" id="tab-listening" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" /><path d="M10 9l6 3-6 3z" /></svg>
+        <span>正在听</span>
+      </button>
+    </nav>
 
     <div class="mini-player" id="mini-player" hidden>
       <button class="mini-button mini-chapter" id="mini-prev-chapter" type="button" aria-label="上一章">上章</button>
