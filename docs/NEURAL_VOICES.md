@@ -73,11 +73,31 @@ onmessage = (event) => {
 };
 ```
 
-## 官方语音包路线（下一阶段）
+## 官方语音包：如何构建与发布
 
-- 首选 sherpa-onnx WASM + Kokoro v1.1-zh（内含多名男声/女声，一次下载全都有），
-  以及 AISHELL-3 多说话人 VITS 作为备选；
-- 由本仓库出一个 `pack-build` 脚本，把上游发布的 wasm 运行时 + 模型 + 适配层
-  engine.js 打成符合 format 1 的 zip，并附 SHA-256 校验；
-- 模型体积超出 Vercel 静态托管限制，官方包走 GitHub Releases / 网盘分发，
-  应用内保持「本地导入」为主通道（中国大陆可用）。
+仓库已内置完整的构建流水线（GitHub Actions：**Build voice pack**）：
+
+1. GitHub 仓库页 → Actions → 「Build voice pack」→ Run workflow：
+   - `source_space`：上游 sherpa-onnx WASM 中文 TTS 构建（Hugging Face 空间 ID）；
+   - `max_sid`：多说话人模型扫描上限；流水线会自动合成各说话人样本、按基频
+     （F0）挑出 2 个男声 + 2 个女声；
+   - `release_tag`：填了就自动发布为 GitHub Release（zip + sha256）。
+2. 流水线步骤：下载运行时 → 扫描说话人 → 组装 format 1 zip → **无头浏览器
+   全链路验证**（引擎直测断言时长/响度 + 应用真实导入试听）→ 上传产物/发布。
+3. 用户拿到 zip 后（Release 下载或经网盘转存到手机），在应用
+   「朗读控制 → 神经语音包 → 导入语音包」导入即可。
+
+本地开发用同一套脚本：
+
+```bash
+# 组装（--source 为本地目录或 HF 空间 ID）
+node scripts/build-voice-pack.mjs --source <dir|space> --out dist/pack.zip \
+  --id sherpa-zh-multi --label "中文多音色语音包" --voices dist/voices.json
+# 扫描说话人（挑男/女声，需 playwright + Chromium）
+node scripts/voice-pack-lab.cjs scan --runtime <dir> --max-sid 40
+# 全链路验证
+node scripts/voice-pack-lab.cjs verify --pack dist/pack.zip
+```
+
+分发说明：模型体积超出 Vercel 静态托管限制，官方包走 GitHub Releases / 网盘
+分发；应用内以「本地导入」为主通道（中国大陆无需境外直连）。

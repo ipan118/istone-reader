@@ -1,0 +1,109 @@
+name: Build voice pack
+
+# 手动触发：下载 sherpa-onnx WASM 中文 TTS 构建 → 扫描说话人挑男/女声 →
+# 组装 istone-voice-pack (.zip) → 无头浏览器全链路验证 → 上传产物 /
+# 可选发布为 GitHub Release（用户下载后在应用里「导入语音包」即可）。
+on:
+  workflow_dispatch:
+    inputs:
+      source_space:
+        description: "上游 Hugging Face 空间 ID（sherpa-onnx wasm 中文 TTS 构建）"
+        required: true
+        default: "k2-fsa/web-assembly-tts-sherpa-onnx-zh"
+      pack_id:
+        description: "语音包 id"
+        required: true
+        default: "sherpa-zh-multi"
+      pack_label:
+        description: "语音包显示名"
+        required: true
+        default: "中文多音色语音包"
+      max_sid:
+        description: "扫描说话人的最大 sid（多说话人模型）"
+        required: true
+        default: "40"
+      release_tag:
+        description: "发布为 Release 的 tag（留空则只出构建产物）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright Chromium
+        run: |
+          npm init -y >/dev/null
+          npm install playwright >/dev/null
+          npx playwright install --with-deps chromium
+
+      - name: Download upstream runtime
+        run: |
+          mkdir -p dist/runtime
+          node - <<'EOF'
+          const fs = require("node:fs");
+          const space = process.env.SOURCE_SPACE;
+          const patterns = [/(^|\/)sherpa-onnx-tts\.js$/, /(^|\/)sherpa-onnx-wasm-main[^/]*\.(js|wasm|data)$/];
+          (async () => {
+            const listing = await (await fetch(`https://huggingface.co/api/spaces/${space}/tree/main`)).json();
+            const files = listing.filter((e) => e.type === "file" && patterns.some((p) => p.test(e.path)));
+            if (!files.length) throw new Error(`no runtime files found in ${space}`);
+            for (const file of files) {
+              const url = `https://huggingface.co/spaces/${space}/resolve/main/${file.path}`;
+              console.log("downloading", file.path);
+              const body = Buffer.from(await (await fetch(url)).arrayBuffer());
+              fs.writeFileSync(`dist/runtime/${file.path.split("/").pop()}`, body);
+            }
+          })().catch((e) => { console.error(e); process.exit(1); });
+          EOF
+          ls -lh dist/runtime
+        env:
+          SOURCE_SPACE: ${{ inputs.source_space }}
+
+      - name: Scan speakers (pick male/female by F0)
+        run: node scripts/voice-pack-lab.cjs scan --runtime dist/runtime --max-sid "${{ inputs.max_sid }}" --out dist/voices.json
+
+      - name: Assemble pack
+        run: |
+          node scripts/build-voice-pack.mjs \
+            --source dist/runtime \
+            --out "dist/${{ inputs.pack_id }}.zip" \
+            --id "${{ inputs.pack_id }}" \
+            --label "${{ inputs.pack_label }}" \
+            --voices dist/voices.json
+
+      - name: Verify pack end-to-end
+        run: node scripts/voice-pack-lab.cjs verify --pack "dist/${{ inputs.pack_id }}.zip"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-pack
+          path: |
+            dist/${{ inputs.pack_id }}.zip
+            dist/${{ inputs.pack_id }}.zip.sha256
+            dist/voices.json
+
+      - name: Publish release
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.release_tag }}" \
+            "dist/${{ inputs.pack_id }}.zip" \
+            "dist/${{ inputs.pack_id }}.zip.sha256" \
+            --title "语音包 ${{ inputs.pack_label }} (${{ inputs.release_tag }})" \
+            --notes "神经语音包（istone-voice-pack format 1）。下载 zip 后在应用「朗读控制 → 神经语音包 → 导入语音包」导入即可，合成全程本机、不联网。校验：见 .sha256 文件。" \
+            || gh release upload "${{ inputs.release_tag }}" \
+                 "dist/${{ inputs.pack_id }}.zip" \
+                 "dist/${{ inputs.pack_id }}.zip.sha256" --clobber
