@@ -43,6 +43,7 @@ run() {
 
 run node "$ROOT/smoke-test.cjs"
 run node "$E2E/mini-player-verify.cjs"
+run node "$E2E/neural-voice-verify.cjs"
 run node "$E2E/anchor-verify.cjs"
 run node "$E2E/desktop-mode-verify.cjs"
 run node "$E2E/storage-verify.cjs"

@@ -35,12 +35,21 @@ import {
   stripFileExtension,
   detectSpeechLang,
 } from "./text-pipeline.mjs";
+import {
+  initNeuralVoicePacks,
+  importVoicePackZip,
+  deleteVoicePack,
+  listNeuralVoicePacks,
+  getNeuralVoiceCatalogEntries,
+  isNeuralVoiceURI,
+  synthesizeNeuralSpeech,
+} from "./neural-voice.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v41";
+const APP_VERSION = "v42";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -269,6 +278,9 @@ const dom = {
   loadDemoButton: document.getElementById("load-demo-button"),
   voiceSelect: document.getElementById("voice-select"),
   voiceStyleSelect: document.getElementById("voice-style-select"),
+  neuralPackInput: document.getElementById("neural-pack-input"),
+  neuralPackList: document.getElementById("neural-pack-list"),
+  neuralPackHint: document.getElementById("neural-pack-hint"),
   voiceReadyPill: document.getElementById("voice-ready-pill"),
   rateRange: document.getElementById("rate-range"),
   rateValue: document.getElementById("rate-value"),
@@ -371,6 +383,9 @@ async function bootstrap() {
   renderSpeechDiagnostics();
   registerMediaSessionHandlers();
   registerVisibilityRecovery();
+  // 神经语音包目录先就绪，首次 loadVoices 就能列出已安装的音色。
+  await initNeuralVoicePacks().catch(() => []);
+  renderNeuralPackList();
   void loadVoices();
   renderJumpButtons(dom.positionDotRow, 0, 0, () => {});
 
@@ -553,6 +568,48 @@ function wireEvents() {
   });
   dom.tabImport?.addEventListener("click", () => {
     dom.fileInput?.click();
+  });
+
+  dom.neuralPackInput?.addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    dom.neuralPackInput.value = "";
+    if (!file) {
+      return;
+    }
+    setStatus(`正在导入语音包 ${file.name}`);
+    try {
+      const manifest = await importVoicePackZip(file);
+      renderNeuralPackList();
+      await loadVoices({ quiet: true });
+      setStatus(`语音包「${manifest.label || manifest.id}」已安装，共 ${manifest.voices.length} 个音色`);
+      renderSpeechDiagnostics(
+        "语音包已安装",
+        `「${manifest.label || manifest.id}」已就绪，可在上方「语音选择」里选用（标注 · 神经语音）。合成全程在本机完成。`,
+        "success",
+      );
+    } catch (error) {
+      setStatus("语音包导入失败");
+      renderSpeechDiagnostics("语音包导入失败", `${error?.message || "无法解析该文件"}`, "error");
+    }
+  });
+
+  dom.neuralPackList?.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-delete-pack]");
+    if (!button) {
+      return;
+    }
+    const packId = button.dataset.deletePack;
+    try {
+      await deleteVoicePack(packId);
+      if (isNeuralVoiceURI(state.voiceURI) && state.voiceURI.includes(`:${packId}:`)) {
+        state.voiceURI = DEFAULT_VOICE_URI;
+      }
+      renderNeuralPackList();
+      await loadVoices({ quiet: true });
+      setStatus("语音包已删除");
+    } catch (error) {
+      renderSpeechDiagnostics("语音包删除失败", `${error?.message || "请稍后重试"}`, "error");
+    }
   });
 
   dom.voiceSelect.addEventListener("change", () => {
@@ -3695,6 +3752,10 @@ function resolveVoiceForText(text, options = {}) {
     if (options.forceUserPreference) {
       return selectedVoice;
     }
+    // 神经音色是用户明确挑选的听感，整本书统一使用，不按语言分流。
+    if (isNeuralVoice(selectedVoice)) {
+      return selectedVoice;
+    }
     const selectedBucket = getVoiceBucket(selectedVoice.lang);
     const targetBucket = getVoiceBucket(targetLang);
     if (!targetBucket || !selectedBucket || getVoiceBase(selectedBucket) === getVoiceBase(targetBucket)) {
@@ -4016,6 +4077,10 @@ function scoreVoice(voice) {
   if (voice.localService) {
     score += 10;
   }
+  // 用户安装的神经音色必须始终出现在精选列表里。
+  if (voice.source === "neural-pack") {
+    score += 220;
+  }
   if (lang === "zh-cn" && PREFERRED_ZH_CN_VOICE_NAMES.some((keyword) => name.includes(keyword))) {
     score += 40;
   }
@@ -4049,8 +4114,41 @@ function formatVoiceOptionLabel(voice) {
       "it-it": "Italiano",
     }[bucket] || (voice.lang || "其他语音");
   const cleanName = cleanVoiceDisplayName(voice.name);
-  const sourceTag = isBridgeVoice(voice) ? " · Windows稳定" : " · 浏览器";
+  const sourceTag = isNeuralVoice(voice) ? " · 神经语音" : isBridgeVoice(voice) ? " · Windows稳定" : " · 浏览器";
   return `${bucketLabel} · ${cleanName}${sourceTag}${voice.default ? " · 默认" : ""}`;
+}
+
+function renderNeuralPackList() {
+  if (!dom.neuralPackList) {
+    return;
+  }
+  const packs = listNeuralVoicePacks();
+  dom.neuralPackList.innerHTML = "";
+  if (!packs.length) {
+    const empty = document.createElement("li");
+    empty.className = "neural-pack-empty";
+    empty.textContent = "尚未安装语音包。获取方式见「使用说明」。";
+    dom.neuralPackList.appendChild(empty);
+    return;
+  }
+  packs.forEach((manifest) => {
+    const item = document.createElement("li");
+    item.className = "neural-pack-item";
+    const info = document.createElement("div");
+    info.className = "neural-pack-item-info";
+    const title = document.createElement("strong");
+    title.textContent = manifest.label || manifest.id;
+    const meta = document.createElement("span");
+    meta.textContent = manifest.voices.map((voice) => voice.name).join(" / ");
+    info.append(title, meta);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "library-delete-button";
+    remove.dataset.deletePack = manifest.id;
+    remove.textContent = "删除";
+    item.append(info, remove);
+    dom.neuralPackList.appendChild(item);
+  });
 }
 
 function refreshToneControls() {
@@ -4153,7 +4251,13 @@ async function loadVoices(options = {}) {
   });
 
   const preferredVoice = pickPreferredDefaultVoice(voices) || pickBestVoice(voices, navigator.language || "zh-CN");
-  if (previousVoiceURI === DEFAULT_VOICE_URI) {
+  if (state.voiceURI !== previousVoiceURI) {
+    // 用户在目录刷新（中间有 await）期间改了选择：以用户的新选择为准，仅在
+    // 该声音已不存在时才回退，绝不能用开头的旧快照把它覆盖回去。
+    if (state.voiceURI !== DEFAULT_VOICE_URI && !voices.some((voice) => voice.voiceURI === state.voiceURI)) {
+      state.voiceURI = preferredVoice?.voiceURI || voices[0].voiceURI;
+    }
+  } else if (previousVoiceURI === DEFAULT_VOICE_URI) {
     state.voiceURI = DEFAULT_VOICE_URI;
   } else if (previousVoiceURI && voices.some((voice) => voice.voiceURI === previousVoiceURI)) {
     state.voiceURI = previousVoiceURI;
@@ -4273,7 +4377,8 @@ function loadBridgeVoices() {
 
 function mergeVoiceCatalog(browserVoices, bridgeVoices) {
   const dedupe = new Set();
-  const merged = [...bridgeVoices, ...browserVoices].filter((voice) => {
+  // 神经语音包音色排最前：用户主动安装的声音永远可见。
+  const merged = [...getNeuralVoiceCatalogEntries(), ...bridgeVoices, ...browserVoices].filter((voice) => {
     const key = canonicalVoiceKey(voice);
     if (!key || dedupe.has(key)) {
       return false;
@@ -4302,6 +4407,10 @@ function canonicalVoiceKey(voice) {
 
 function isBridgeVoice(voice) {
   return Boolean(voice?.source === "windows-bridge" || String(voice?.voiceURI || "").startsWith(BRIDGE_VOICE_PREFIX));
+}
+
+function isNeuralVoice(voice) {
+  return Boolean(voice?.source === "neural-pack" || isNeuralVoiceURI(voice?.voiceURI));
 }
 
 function getBridgeVoiceName(voice) {
@@ -4371,10 +4480,32 @@ async function playBridgeVoiceAudio(text, voice, handlers = {}) {
   if (state.speechAbortController === controller) {
     state.speechAbortController = null;
   }
+  return playSpeechAudioBlob(blob, handlers);
+}
+
+// 神经语音：Worker 本机合成 WAV → 与桥接声线共用的音频播放通路。语速经
+// playbackRate 应用（合成按 1x 出，改速不用重新合成）。
+async function playNeuralVoiceAudio(text, voice, handlers = {}) {
+  const speechText = sanitizeTextForSpeech(text);
+  if (!speechText) {
+    handlers.onend?.();
+    return null;
+  }
+  const blob = await synthesizeNeuralSpeech(voice.voiceURI, speechText);
+  if (typeof handlers.nonce === "number" && handlers.nonce !== state.speechAttemptNonce) {
+    return null;
+  }
+  return playSpeechAudioBlob(blob, { ...handlers, playbackRate: effectiveSpeechRate() });
+}
+
+async function playSpeechAudioBlob(blob, handlers = {}) {
   clearActiveAudio();
   const audioUrl = URL.createObjectURL(blob);
   const audio = new Audio(audioUrl);
   audio.volume = sleepFadeVolume();
+  if (Number(handlers.playbackRate) > 0) {
+    audio.playbackRate = Number(handlers.playbackRate);
+  }
   state.activeAudio = audio;
   state.activeAudioUrl = audioUrl;
 
@@ -4424,6 +4555,31 @@ async function runVoiceSelfTest() {
 
   const sampleText = buildVoiceSelfTestText(selectedVoice);
   renderSpeechDiagnostics("开始朗读自检", `将尝试用 ${selectedVoice.name || "默认声音"} 说一句测试语。`, "warning");
+
+  if (isNeuralVoice(selectedVoice)) {
+    try {
+      stopSpeech({ silent: true });
+      renderSpeechDiagnostics("正在本机合成", `神经音色 ${selectedVoice.name} 正在合成试听语句，首次使用会稍慢。`, "warning");
+      await playNeuralVoiceAudio(sampleText, selectedVoice, {
+        onstart: () => {
+          renderSpeechDiagnostics(
+            "浏览器已开始发声",
+            `当前使用神经音色 ${selectedVoice.name}，本机合成、不联网。如果你没听到，请检查媒体音量。`,
+            "success",
+          );
+        },
+        onend: () => {
+          renderSpeechDiagnostics("测试语音已结束", "神经语音已完成测试播放。", "success");
+        },
+        onerror: () => {
+          renderSpeechDiagnostics("神经语音发声失败", "语音包没有成功播放，可尝试重新导入语音包。", "error");
+        },
+      });
+    } catch (error) {
+      renderSpeechDiagnostics("神经语音发声失败", `${error?.message || "语音包没有成功播放"}`, "error");
+    }
+    return;
+  }
 
   if (isBridgeVoice(selectedVoice)) {
     try {
@@ -4657,13 +4813,14 @@ function speakSentenceAt(sentenceIndex, fallbackTried = false, attemptNonce = st
     renderSpeechDiagnostics("朗读失败", `${details.title}。${details.message}`, details.state || "error");
   };
 
-  if (selectedVoice && isBridgeVoice(selectedVoice)) {
+  if (selectedVoice && (isBridgeVoice(selectedVoice) || isNeuralVoice(selectedVoice))) {
     if (options.queueOnly) {
-      // Bridge audio is fetched on demand and cannot sit in the engine
-      // queue; it chains sequentially from the previous unit's end instead.
+      // Bridge/neural audio is produced on demand and cannot sit in the
+      // engine queue; it chains sequentially from the previous unit's end.
       return false;
     }
-    void playBridgeVoiceAudio(speechText, selectedVoice, {
+    const playAudioUnit = isNeuralVoice(selectedVoice) ? playNeuralVoiceAudio : playBridgeVoiceAudio;
+    void playAudioUnit(speechText, selectedVoice, {
       nonce: attemptNonce,
       onstart: onStart,
       onend: () => {
