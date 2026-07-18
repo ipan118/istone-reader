@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       source_space:
-        description: "上游 Hugging Face 空间 ID（sherpa-onnx wasm 中文 TTS 构建）"
+        description: "上游来源：auto = 自动发现 k2-fsa/csukuangfj 的中文 WASM TTS 空间；也可填具体空间 ID"
         required: true
-        default: "k2-fsa/web-assembly-tts-sherpa-onnx-zh"
+        default: "auto"
       pack_id:
         description: "语音包 id"
         required: true
@@ -49,26 +49,8 @@ jobs:
 
       - name: Download upstream runtime
         run: |
-          mkdir -p dist/runtime
-          node - <<'EOF'
-          const fs = require("node:fs");
-          const space = process.env.SOURCE_SPACE;
-          const patterns = [/(^|\/)sherpa-onnx-tts\.js$/, /(^|\/)sherpa-onnx-wasm-main[^/]*\.(js|wasm|data)$/];
-          (async () => {
-            const listing = await (await fetch(`https://huggingface.co/api/spaces/${space}/tree/main`)).json();
-            const files = listing.filter((e) => e.type === "file" && patterns.some((p) => p.test(e.path)));
-            if (!files.length) throw new Error(`no runtime files found in ${space}`);
-            for (const file of files) {
-              const url = `https://huggingface.co/spaces/${space}/resolve/main/${file.path}`;
-              console.log("downloading", file.path);
-              const body = Buffer.from(await (await fetch(url)).arrayBuffer());
-              fs.writeFileSync(`dist/runtime/${file.path.split("/").pop()}`, body);
-            }
-          })().catch((e) => { console.error(e); process.exit(1); });
-          EOF
+          node scripts/build-voice-pack.mjs --source "${{ inputs.source_space }}" --fetch-to dist/runtime
           ls -lh dist/runtime
-        env:
-          SOURCE_SPACE: ${{ inputs.source_space }}
 
       - name: Scan speakers (pick male/female by F0)
         run: node scripts/voice-pack-lab.cjs scan --runtime dist/runtime --max-sid "${{ inputs.max_sid }}" --out dist/voices.json
