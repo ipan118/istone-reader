@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v40";
+const APP_VERSION = "v41";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -75,6 +75,23 @@ const TONE_PRESETS = {
     backgroundStops: ["#f7f7f9", "#f1f1f5", "#f1f1f5"],
   },
 };
+
+// 声音风格：在同一条系统声线上叠加音调（+微量语速）派生不同听感。系统只给
+// 一个声音的手机也能借此获得多种可选风格，且完全离线。「标准」保持 pitch=1。
+const VOICE_STYLE_PRESETS = {
+  standard: { label: "标准", pitch: 1, rateFactor: 1 },
+  deep: { label: "低沉", pitch: 0.7, rateFactor: 0.96 },
+  bright: { label: "清亮", pitch: 1.3, rateFactor: 1 },
+  brisk: { label: "轻快", pitch: 1.12, rateFactor: 1.12 },
+};
+
+function getVoiceStylePreset() {
+  return VOICE_STYLE_PRESETS[state.voiceStyle] || VOICE_STYLE_PRESETS.standard;
+}
+
+function effectiveSpeechRate() {
+  return clamp(state.rate * getVoiceStylePreset().rateFactor, 0.5, 3.0);
+}
 
 const demoBookText = `# 序章 星光图书馆
 凌晨两点，城市还亮着零星的窗。澄蓝色的自动门在雨里滑开，一家名为星光图书馆的夜读空间开始迎接第一批晚归的人。
@@ -173,6 +190,7 @@ const state = {
   activeAudio: null,
   activeAudioUrl: "",
   voiceURI: "",
+  voiceStyle: "standard",
   rate: 1,
   pitch: 1,
   tonePreset: "light",
@@ -250,6 +268,7 @@ const dom = {
   tabListening: document.getElementById("tab-listening"),
   loadDemoButton: document.getElementById("load-demo-button"),
   voiceSelect: document.getElementById("voice-select"),
+  voiceStyleSelect: document.getElementById("voice-style-select"),
   voiceReadyPill: document.getElementById("voice-ready-pill"),
   rateRange: document.getElementById("rate-range"),
   rateValue: document.getElementById("rate-value"),
@@ -543,8 +562,28 @@ function wireEvents() {
     saveSettings();
     // Idle auto-preview: picking a voice immediately speaks a short sample, so
     // auditioning voices needs no separate test tap. During playback the
-    // switch is applied to the current sentence above instead.
-    if (!isSpeechActive()) {
+    // switch is applied to the current sentence above instead. Keyed off the
+    // app-level speaking flag so a still-playing preview sample gets replaced
+    // by the new preview instead of blocking it.
+    if (!state.speaking) {
+      void runVoiceSelfTest();
+    }
+  });
+
+  dom.voiceStyleSelect?.addEventListener("change", () => {
+    const previousFactor = getVoiceStylePreset().rateFactor;
+    state.voiceStyle = Object.hasOwn(VOICE_STYLE_PRESETS, dom.voiceStyleSelect.value)
+      ? dom.voiceStyleSelect.value
+      : "standard";
+    // The learned ms/char was measured at the old style speed; rescale it so
+    // the read-along estimate stays calibrated (same as the rate slider).
+    const nextFactor = getVoiceStylePreset().rateFactor;
+    if (state.speechMsPerCharEwma > 0 && nextFactor > 0) {
+      state.speechMsPerCharEwma *= previousFactor / nextFactor;
+    }
+    saveSettings();
+    handleVoiceChangeDuringPlayback();
+    if (!state.speaking) {
       void runVoiceSelfTest();
     }
   });
@@ -796,6 +835,7 @@ function hydrateSettings() {
     state.ocrLanguage = Object.hasOwn(OCR_LANGUAGE_LABELS, settings.ocrLanguage) ? settings.ocrLanguage : state.ocrLanguage;
     state.rate = clamp(Number(settings.rate) || state.rate, 0.5, 3.0);
     state.voiceURI = typeof settings.voiceURI === "string" ? settings.voiceURI : state.voiceURI;
+    state.voiceStyle = Object.hasOwn(VOICE_STYLE_PRESETS, settings.voiceStyle) ? settings.voiceStyle : state.voiceStyle;
     state.fontScale = clamp(Number(settings.fontScale) || state.fontScale, 85, 140);
     state.keepScreenOn = settings.keepScreenOn !== false;
   } catch {
@@ -811,6 +851,7 @@ function saveSettings() {
     ocrLanguage: state.ocrLanguage,
     rate: state.rate,
     voiceURI: state.voiceURI,
+    voiceStyle: state.voiceStyle,
     fontScale: state.fontScale,
     keepScreenOn: state.keepScreenOn,
   };
@@ -824,6 +865,9 @@ function refreshSpeechControls() {
   dom.rateValue.textContent = `${state.rate.toFixed(1)}x`;
   if (dom.keepAwakeToggle) {
     dom.keepAwakeToggle.checked = state.keepScreenOn;
+  }
+  if (dom.voiceStyleSelect) {
+    dom.voiceStyleSelect.value = state.voiceStyle;
   }
 }
 
@@ -852,7 +896,9 @@ function scheduleVoiceReload() {
 }
 
 function handleVoiceChangeDuringPlayback() {
-  if (!state.book || state.paused || !isSpeechActive()) {
+  // state.speaking（应用级"正在朗读本书"）而非引擎原始状态：变更声音时若只是
+  // 试听样本还在播，不能误触发整本书开始朗读。
+  if (!state.book || state.paused || !state.speaking || !isSpeechActive()) {
     return;
   }
   requestSpeechRestart("正在切换声音，当前句将重新朗读", SPEECH_VOICE_SWITCH_DELAY_MS);
@@ -860,7 +906,7 @@ function handleVoiceChangeDuringPlayback() {
 
 function applyRateChangeDuringPlayback() {
   if (state.activeAudio) {
-    state.activeAudio.playbackRate = clamp(state.rate, 0.5, 3.0);
+    state.activeAudio.playbackRate = effectiveSpeechRate();
     dom.speechStateHint.textContent = `语速已调整为 ${state.rate.toFixed(1)}x`;
     return;
   }
@@ -4093,7 +4139,7 @@ async function loadVoices(options = {}) {
     refreshVoiceHint();
     renderSpeechDiagnostics(
       "等待系统语音",
-      `当前浏览器没有返回可选语音列表，但仍可尝试使用系统默认声音朗读。${getVoiceEnvironmentGuidance()}${getPlatformSpeechChecks()}`,
+      `当前浏览器没有返回可选语音列表，但仍可尝试使用系统默认声音朗读。想要不同听感，可直接用「声音风格」切换低沉、清亮等风格（无需安装）。想要更多真人声线：安卓在系统设置的「文字转语音 (TTS)」里安装或切换语音引擎后回到本页刷新；iPhone 在「设置 → 辅助功能 → 朗读内容 → 声音」里下载。${getVoiceEnvironmentGuidance()}${getPlatformSpeechChecks()}`,
       "warning",
     );
     return;
@@ -4120,11 +4166,19 @@ async function loadVoices(options = {}) {
   dom.voiceReadyPill.textContent = `${voices.length} 种精选语音`;
   refreshVoiceHint();
   if (!options.quiet) {
-    renderSpeechDiagnostics(
-      "朗读引擎已就绪",
-      `当前已整理出 ${voices.length} 种更适合听读的语音，全部为设备本机声线，朗读不联网。英文句子和英文数字会优先匹配英文声音。`,
-      "success",
-    );
+    if (voices.length <= 1) {
+      renderSpeechDiagnostics(
+        "本机声线较少",
+        `这台设备只向浏览器暴露了 ${voices.length} 个本机声线（朗读仍完全离线）。想要不同听感，可直接用「声音风格」切换低沉、清亮等风格（无需安装）。想要更多真人声线：安卓在系统设置的「文字转语音 (TTS)」里安装或切换语音引擎（如 Google 文字转语音、讯飞语音引擎），切换后回到本页刷新；iPhone 在「设置 → 辅助功能 → 朗读内容 → 声音」里下载。`,
+        "warning",
+      );
+    } else {
+      renderSpeechDiagnostics(
+        "朗读引擎已就绪",
+        `当前已整理出 ${voices.length} 种更适合听读的语音，全部为设备本机声线，朗读不联网。英文句子和英文数字会优先匹配英文声音。`,
+        "success",
+      );
+    }
   }
 }
 
@@ -4398,10 +4452,9 @@ async function runVoiceSelfTest() {
   const utterance = buildSpeechUtterance(sampleText, selectedVoice);
   stopSpeech({ silent: true });
   await resetSpeechEngine();
-  utterance.rate = clamp(state.rate, 0.5, 3.0);
-  // Natural pitch. A leftover UI mapping used to force every voice down to
-  // 0.8, audibly deepening all speech (the pitch control was removed long ago).
-  utterance.pitch = 1;
+  utterance.rate = effectiveSpeechRate();
+  // 「标准」风格保持 pitch=1（自然音调）；其余风格叠加音调派生不同听感。
+  utterance.pitch = getVoiceStylePreset().pitch;
   utterance.onstart = () => {
     renderSpeechDiagnostics(
       "浏览器已开始发声",
@@ -4642,10 +4695,9 @@ function speakSentenceAt(sentenceIndex, fallbackTried = false, attemptNonce = st
   // Keep a strong reference: Chrome garbage-collects pending utterances
   // otherwise, silently dropping their events.
   state.utteranceRefs.push(utterance);
-  utterance.rate = clamp(state.rate, 0.5, 3.0);
-  // Natural pitch. A leftover UI mapping used to force every voice down to
-  // 0.8, audibly deepening all speech (the pitch control was removed long ago).
-  utterance.pitch = 1;
+  utterance.rate = effectiveSpeechRate();
+  // 「标准」风格保持 pitch=1（自然音调）；其余风格叠加音调派生不同听感。
+  utterance.pitch = getVoiceStylePreset().pitch;
   utterance.volume = sleepFadeVolume();
   let queuedAhead = false;
   utterance.onstart = () => {
