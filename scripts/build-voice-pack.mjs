@@ -2,14 +2,16 @@
 // 组装官方神经语音包（istone-voice-pack format 1，引擎 sherpa-onnx WASM）。
 //
 // 用法：
-//   node scripts/build-voice-pack.mjs --source <目录或HF空间ID> [--out dist/pack.zip]
+//   node scripts/build-voice-pack.mjs --source <目录|HF空间ID|auto> [--out dist/pack.zip]
 //     [--id vits-zh-aishell3] [--label "中文多音色（AISHELL-3）"]
-//     [--voices voices.json]
+//     [--voices voices.json] [--fetch-to dist/runtime]
 //
-// --source 两种取值：
+// --source 三种取值：
 //   1) 本地目录：已包含 sherpa-onnx-tts.js / sherpa-onnx-wasm-main*.{js,wasm,data}；
-//   2) Hugging Face 空间 ID（如 k2-fsa/web-assembly-tts-sherpa-onnx-zh）：
-//      自动列出并下载上述文件（需要网络，通常在 GitHub Actions 里跑）。
+//   2) Hugging Face 空间 ID：自动列出并下载上述文件（需要网络）；
+//   3) auto：自动发现——枚举 k2-fsa / csukuangfj 名下的空间，按关键词筛选中文
+//      WASM TTS 构建并逐个探测，取第一个文件齐全的（优先 aishell3 多说话人）。
+// --fetch-to <目录>：只下载运行时文件到目录后退出（供扫描说话人用）。
 // --voices 指向 JSON 数组：[{ "id":"male-1","name":"男声一","lang":"zh-CN","sid":10 }, ...]
 //   sid 为 sherpa-onnx 多说话人模型的说话人编号（可用 voice-pack-lab.cjs scan 挑选）。
 //
@@ -38,9 +40,10 @@ function parseArgs(argv) {
     else if (key === "--id") args.id = argv[++i];
     else if (key === "--label") args.label = argv[++i];
     else if (key === "--voices") args.voices = argv[++i];
+    else if (key === "--fetch-to") args.fetchTo = argv[++i];
     else throw new Error(`未知参数：${key}`);
   }
-  if (!args.source) throw new Error("必须提供 --source（本地目录或 HF 空间 ID）");
+  if (!args.source) throw new Error("必须提供 --source（本地目录、HF 空间 ID 或 auto）");
   return args;
 }
 
@@ -51,8 +54,63 @@ const DEFAULT_VOICES = [
   { id: "female-2", name: "女声二 · 明快", lang: "zh-CN", sid: 3 },
 ];
 
+async function listSpaceRuntimePaths(space) {
+  // recursive=true：部分空间把 wasm 构建放在子目录里。
+  const listing = await fetchJson(`https://huggingface.co/api/spaces/${space}/tree/main?recursive=true`);
+  if (!Array.isArray(listing)) {
+    throw new Error(`空间 ${space} 列表返回异常：${JSON.stringify(listing).slice(0, 200)}`);
+  }
+  return listing
+    .filter((entry) => entry.type === "file")
+    .map((entry) => entry.path)
+    .filter((path) => RUNTIME_FILE_PATTERNS.some((pattern) => pattern.test(path)));
+}
+
+function runtimePathsComplete(paths) {
+  return RUNTIME_FILE_PATTERNS.every((pattern) => paths.some((path) => pattern.test(path)));
+}
+
+// 自动发现：枚举候选作者的空间，按名字关键词粗筛，再逐个探测文件是否齐全。
+async function discoverSpace() {
+  const authors = ["k2-fsa", "csukuangfj"];
+  const candidates = [];
+  for (const author of authors) {
+    try {
+      const spaces = await fetchJson(`https://huggingface.co/api/spaces?author=${author}&limit=200`);
+      if (!Array.isArray(spaces)) continue;
+      for (const item of spaces) {
+        const id = item?.id || "";
+        const name = id.toLowerCase();
+        if (!/tts|text-to-speech/.test(name)) continue;
+        if (!/wasm|web-assembly|webassembly/.test(name)) continue;
+        if (!/zh|chinese|aishell|melo|kokoro|cantonese/.test(name)) continue;
+        // 偏好多说话人小模型：aishell3 > kokoro > 其它中文。
+        const score = /aishell/.test(name) ? 3 : /kokoro/.test(name) ? 2 : 1;
+        candidates.push({ id, score });
+      }
+    } catch (error) {
+      process.stderr.write(`枚举 ${author} 的空间失败：${error.message}\n`);
+    }
+  }
+  candidates.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  process.stderr.write(`候选空间：${candidates.map((c) => c.id).join(", ") || "无"}\n`);
+  for (const candidate of candidates) {
+    try {
+      const paths = await listSpaceRuntimePaths(candidate.id);
+      if (runtimePathsComplete(paths)) {
+        process.stderr.write(`选用空间：${candidate.id}\n`);
+        return { space: candidate.id, paths };
+      }
+      process.stderr.write(`跳过 ${candidate.id}：运行时文件不齐（${paths.join(", ") || "无匹配"}）\n`);
+    } catch (error) {
+      process.stderr.write(`跳过 ${candidate.id}：${error.message}\n`);
+    }
+  }
+  throw new Error("自动发现失败：没有找到文件齐全的 sherpa-onnx wasm 中文 TTS 空间");
+}
+
 async function collectRuntimeFiles(source) {
-  const isLocal = existsSync(source) && statSync(source).isDirectory();
+  const isLocal = source !== "auto" && existsSync(source) && statSync(source).isDirectory();
   if (isLocal) {
     const files = new Map();
     for (const name of readdirSync(source)) {
@@ -63,19 +121,19 @@ async function collectRuntimeFiles(source) {
     return files;
   }
 
-  // Hugging Face 空间：列文件 → 下载运行时文件。
-  const listUrl = `https://huggingface.co/api/spaces/${source}/tree/main`;
-  const listing = await fetchJson(listUrl);
-  const names = listing
-    .filter((entry) => entry.type === "file")
-    .map((entry) => entry.path)
-    .filter((path) => RUNTIME_FILE_PATTERNS.some((pattern) => pattern.test(path)));
-  if (!names.length) {
-    throw new Error(`在空间 ${source} 里没有找到 sherpa-onnx wasm 运行时文件`);
+  let space = source;
+  let paths;
+  if (source === "auto") {
+    ({ space, paths } = await discoverSpace());
+  } else {
+    paths = await listSpaceRuntimePaths(space);
+    if (!paths.length) {
+      throw new Error(`在空间 ${space} 里没有找到 sherpa-onnx wasm 运行时文件（可用 --source auto 自动发现）`);
+    }
   }
   const files = new Map();
-  for (const path of names) {
-    const url = `https://huggingface.co/spaces/${source}/resolve/main/${path}`;
+  for (const path of paths) {
+    const url = `https://huggingface.co/spaces/${space}/resolve/main/${path}`;
     process.stderr.write(`下载 ${path} ...\n`);
     files.set(basename(path), await fetchBinary(url));
   }
@@ -164,6 +222,16 @@ async function main() {
   if (!Array.isArray(voices) || !voices.length) throw new Error("--voices 必须是非空数组");
 
   const runtimeFiles = await collectRuntimeFiles(args.source);
+
+  if (args.fetchTo) {
+    const target = resolve(args.fetchTo);
+    mkdirSync(target, { recursive: true });
+    for (const [name, data] of runtimeFiles) {
+      writeFileSync(join(target, name), data);
+    }
+    console.log(`运行时文件已保存到 ${target}：${[...runtimeFiles.keys()].join(", ")}`);
+    return;
+  }
   const missing = RUNTIME_FILE_PATTERNS.filter(
     (pattern) => ![...runtimeFiles.keys()].some((name) => pattern.test(name)),
   );
