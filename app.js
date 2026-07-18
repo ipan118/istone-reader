@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", 
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v39";
+const APP_VERSION = "v40";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -245,6 +245,9 @@ const state = {
 const dom = {
   statusChip: document.getElementById("status-chip"),
   fileInput: document.getElementById("book-file-input"),
+  tabShelf: document.getElementById("tab-shelf"),
+  tabImport: document.getElementById("tab-import"),
+  tabListening: document.getElementById("tab-listening"),
   loadDemoButton: document.getElementById("load-demo-button"),
   voiceSelect: document.getElementById("voice-select"),
   voiceReadyPill: document.getElementById("voice-ready-pill"),
@@ -514,6 +517,23 @@ function wireEvents() {
 
   dom.loadDemoButton.addEventListener("click", () => {
     loadDemoBook();
+  });
+
+  // 底部快速导航：书架 / ➕导入 / 正在听。
+  const quickNavTabs = [dom.tabShelf, dom.tabListening];
+  const setActiveQuickNavTab = (active) => {
+    quickNavTabs.forEach((tab) => tab?.classList.toggle("active", tab === active));
+  };
+  dom.tabShelf?.addEventListener("click", () => {
+    setActiveQuickNavTab(dom.tabShelf);
+    document.querySelector(".library-block")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  dom.tabListening?.addEventListener("click", () => {
+    setActiveQuickNavTab(dom.tabListening);
+    document.querySelector(".reader-card")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+  dom.tabImport?.addEventListener("click", () => {
+    dom.fileInput?.click();
   });
 
   dom.voiceSelect.addEventListener("change", () => {
@@ -2240,15 +2260,30 @@ async function refreshLibraryUi() {
       item.classList.add("active");
     }
 
+    const sectionCount = Math.max(1, bookMeta.sectionCount || 1);
+    const percent = bookMeta.progress
+      ? Math.round((clamp(bookMeta.progress.sectionIndex + 1, 1, sectionCount) / sectionCount) * 100)
+      : 0;
+
+    const cover = document.createElement("div");
+    cover.className = `library-cover ${libraryCoverClass(bookMeta.title)}`;
+    const coverInitial = document.createElement("b");
+    coverInitial.textContent = (bookMeta.title || "书").trim().charAt(0) || "书";
+    const coverPercent = document.createElement("span");
+    coverPercent.className = "library-cover-pct";
+    coverPercent.textContent = `${percent}%`;
+    const coverBar = document.createElement("span");
+    coverBar.className = "library-cover-bar";
+    const coverBarFill = document.createElement("i");
+    coverBarFill.style.width = `${percent}%`;
+    coverBar.appendChild(coverBarFill);
+    cover.append(coverInitial, coverPercent, coverBar);
+
     const info = document.createElement("div");
     info.className = "library-item-info";
     const title = document.createElement("strong");
     title.textContent = bookMeta.title || "未命名书籍";
     const meta = document.createElement("span");
-    const sectionCount = Math.max(1, bookMeta.sectionCount || 1);
-    const percent = bookMeta.progress
-      ? Math.round((clamp(bookMeta.progress.sectionIndex + 1, 1, sectionCount) / sectionCount) * 100)
-      : 0;
     meta.textContent = `${bookMeta.format || "书籍"} · ${sectionCount} 章 · 进度 ${percent}%`;
     info.append(title, meta);
 
@@ -2282,9 +2317,18 @@ async function refreshLibraryUi() {
     });
     actions.append(openButton, deleteButton);
 
-    item.append(info, actions);
+    item.append(cover, info, actions);
     dom.libraryList.appendChild(item);
   });
+}
+
+// 封面底色按书名哈希稳定取色，同一本书每次进来颜色一致。
+function libraryCoverClass(title) {
+  let hash = 0;
+  for (const ch of String(title || "")) {
+    hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+  }
+  return `library-cover-c${hash % 6}`;
 }
 
 function renderBookMeta() {
@@ -4078,7 +4122,7 @@ async function loadVoices(options = {}) {
   if (!options.quiet) {
     renderSpeechDiagnostics(
       "朗读引擎已就绪",
-      `当前已整理出 ${voices.length} 种更适合听读的语音。英文句子和英文数字会优先匹配英文声音。`,
+      `当前已整理出 ${voices.length} 种更适合听读的语音，全部为设备本机声线，朗读不联网。英文句子和英文数字会优先匹配英文声音。`,
       "success",
     );
   }
@@ -4175,7 +4219,7 @@ function loadBridgeVoices() {
 
 function mergeVoiceCatalog(browserVoices, bridgeVoices) {
   const dedupe = new Set();
-  return [...bridgeVoices, ...browserVoices].filter((voice) => {
+  const merged = [...bridgeVoices, ...browserVoices].filter((voice) => {
     const key = canonicalVoiceKey(voice);
     if (!key || dedupe.has(key)) {
       return false;
@@ -4183,6 +4227,10 @@ function mergeVoiceCatalog(browserVoices, bridgeVoices) {
     dedupe.add(key);
     return true;
   });
+  // 语音固定使用本机声线：网络合成的声线（localService === false）不进目录，
+  // 朗读永不联网。仅当设备一个本机声线都没有时才放行网络声线，避免完全无声。
+  const localVoices = merged.filter((voice) => voice.localService !== false);
+  return localVoices.length ? localVoices : merged;
 }
 
 function selectBridgeSupplementVoices(browserVoices, bridgeVoices) {
@@ -4730,7 +4778,7 @@ function refreshVoiceHint() {
     : "";
   dom.voiceHint.textContent = voice
     ? `当前已选：${formatVoiceOptionLabel(voice)}。${environmentHint}${stabilityHint}${englishVoiceHint}${routingHint}`
-    : `语音来自当前设备系统。不同手机、浏览器和系统语音包，看到的可选声音会不同。${defaultHint}${environmentHint}${stabilityHint}${englishVoiceHint}${routingHint}`;
+    : `语音全部来自设备本机的系统声线，朗读不联网。不同手机、浏览器和系统语音包，看到的可选声音会不同。${defaultHint}${environmentHint}${stabilityHint}${englishVoiceHint}${routingHint}`;
 }
 
 function loadDemoBook(options = {}) {

@@ -466,17 +466,109 @@ button {
   color: var(--text-soft);
 }
 
+/* --- Bottom quick-nav tab bar: 书架 / ➕导入 / 正在听 --- */
+/* Keep the last content clear of the fixed bar even without the mini player. */
+body {
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+}
+
+.tab-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  width: min(680px, calc(100% - 20px));
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 999px;
+  background: var(--panel-top);
+  border: 1px solid var(--surface-strong);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 55;
+}
+
+body[data-tone="light"] .tab-bar {
+  box-shadow: 0 12px 30px rgba(20, 20, 28, 0.18);
+}
+
+.tab-item {
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  background: none;
+  border: 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  padding: 3px 0;
+  cursor: pointer;
+}
+
+.tab-item.active {
+  color: var(--text-main);
+  font-weight: 700;
+}
+
+.tab-item svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
+/* 导入 ➕：白色胶囊 + 红青错位底片（概念稿的标志性按钮）。 */
+.tab-create {
+  position: relative;
+  display: block;
+  width: 42px;
+  height: 27px;
+}
+
+.tab-create::before,
+.tab-create::after,
+.tab-create > span {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+}
+
+.tab-create::before {
+  background: var(--accent-aux);
+  transform: translateX(-4px);
+}
+
+.tab-create::after {
+  background: var(--accent-primary);
+  transform: translateX(4px);
+}
+
+.tab-create > span {
+  display: grid;
+  place-items: center;
+  background: #ffffff;
+  color: #000000;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  z-index: 1;
+}
+
 /* --- Sticky mini player --- */
-/* Playback controls stay reachable while reading anywhere on the page. */
+/* Playback controls stay reachable while reading anywhere on the page;
+   the bar floats above the quick-nav tab bar. */
 body.has-mini-player {
-  padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(152px + env(safe-area-inset-bottom, 0px));
 }
 
 .mini-player {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(70px + env(safe-area-inset-bottom, 0px));
   width: min(680px, calc(100% - 20px));
   display: flex;
   align-items: center;
@@ -568,7 +660,7 @@ body[data-tone="light"] .mini-player {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(110px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(160px + env(safe-area-inset-bottom, 0px));
   padding: 10px 18px;
   border-radius: 999px;
   border: 0;
@@ -1107,28 +1199,31 @@ input[type="range"]::-moz-range-thumb {
   border: 1px solid var(--line);
 }
 
+/* 书架：等大封面网格（书名首字 + 稳定底色 + 进度角标）。 */
 .library-list {
   margin: 0;
   padding: 0;
   list-style: none;
   display: grid;
-  gap: 8px;
-  max-height: 240px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  max-height: 420px;
   overflow-y: auto;
 }
 
 .library-empty {
+  grid-column: 1 / -1;
   color: var(--text-soft);
   font-size: 0.9rem;
   line-height: 1.6;
 }
 
 .library-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-width: 0;
+  padding: 8px;
   border-radius: var(--radius-md);
   background: var(--surface-soft);
   border: 1px solid var(--line);
@@ -1139,6 +1234,57 @@ input[type="range"]::-moz-range-thumb {
   background: var(--active-surface);
 }
 
+.library-cover {
+  aspect-ratio: 3 / 4;
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.library-cover b {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+
+.library-cover-pct {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+}
+
+.library-cover-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.library-cover-bar i {
+  display: block;
+  height: 100%;
+  background: var(--accent-primary);
+}
+
+.library-cover-c0 { background: linear-gradient(160deg, #3c2f4e, #171522); }
+.library-cover-c1 { background: linear-gradient(160deg, #16324a, #0d1420); }
+.library-cover-c2 { background: linear-gradient(160deg, #45311d, #1c130c); }
+.library-cover-c3 { background: linear-gradient(160deg, #14413a, #0a1a17); }
+.library-cover-c4 { background: linear-gradient(160deg, #4a1d2c, #1c0c12); }
+.library-cover-c5 { background: linear-gradient(160deg, #33383f, #101216); }
+
 .library-item-info {
   display: grid;
   gap: 2px;
@@ -1146,7 +1292,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .library-item-info strong {
-  font-size: 0.95rem;
+  font-size: 0.85rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1154,14 +1300,24 @@ input[type="range"]::-moz-range-thumb {
 
 .library-item-info span {
   color: var(--text-soft);
-  font-size: 0.82rem;
+  font-size: 0.74rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
 .library-item-actions {
-  display: flex;
+  display: grid;
   gap: 6px;
-  flex-shrink: 0;
+}
+
+.library-item-actions .library-open-button,
+.library-item-actions .library-delete-button {
+  width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .library-open-button,

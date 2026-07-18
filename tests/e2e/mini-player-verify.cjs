@@ -2,7 +2,11 @@
 const { chromium } = require("playwright");
 const MOCK = `(() => {
   const synth = { speaking:false, pending:false, paused:false, _q:[], _cur:null, _t:[],
-    getVoices(){ return [{ name:"Mock zh", lang:"zh-CN", voiceURI:"mock-zh", localService:true, default:true }]; },
+    getVoices(){ return [
+      { name:"Mock zh", lang:"zh-CN", voiceURI:"mock-zh", localService:true, default:true },
+      { name:"Mock zh backup", lang:"zh-CN", voiceURI:"mock-zh-2", localService:true, default:false },
+      { name:"Mock net cloud", lang:"zh-CN", voiceURI:"mock-net", localService:false, default:false },
+    ]; },
     onvoiceschanged:null,
     speak(u){ this._q.push(u); this.pending=true; this._pump(); },
     _pump(){ if(this._cur||!this._q.length) return; const u=this._q.shift(); this._cur=u; this.speaking=true;
@@ -68,6 +72,17 @@ const MOCK = `(() => {
   await page.click("#stop-button");
   await page.waitForFunction(() => document.getElementById("mini-play").textContent === "▶", null, { timeout: 5000 });
   console.log("play/pause(cancel-based)/resume/stop OK");
+
+  // Local-voice policy: network voices (localService === false) must never
+  // reach the catalog — reading stays fully on-device.
+  const voiceOptions = await page.evaluate(() =>
+    [...document.querySelectorAll("#voice-select option")].map((option) => option.textContent),
+  );
+  if (voiceOptions.some((text) => text.includes("Mock net cloud")))
+    throw new Error("network voice leaked into the catalog: " + JSON.stringify(voiceOptions));
+  if (!voiceOptions.some((text) => text.includes("Mock zh")))
+    throw new Error("local voices missing from the catalog: " + JSON.stringify(voiceOptions));
+  console.log("local-only voice catalog OK:", JSON.stringify(voiceOptions));
 
   // Idle voice auto-preview: changing the voice while stopped speaks a short
   // sample in the chosen voice without flipping the player into playing state.
