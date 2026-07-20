@@ -70,30 +70,49 @@ function runtimePathsComplete(paths) {
   return RUNTIME_FILE_PATTERNS.every((pattern) => paths.some((path) => pattern.test(path)));
 }
 
-// 自动发现：枚举候选作者的空间，按名字关键词粗筛，再逐个探测文件是否齐全。
+function scoreSpaceName(name) {
+  // 偏好多说话人模型（能出男声+女声）：aishell3 最优；zipvoice 是提示音克隆式
+  // 模型（通常单音色、用法不同），只作最后兜底。
+  if (/zipvoice/.test(name)) return 0;
+  if (/aishell/.test(name)) return 5;
+  if (/kokoro/.test(name)) return 4;
+  if (/vits|matcha|melo/.test(name)) return 3;
+  return 2;
+}
+
+function isCandidateSpaceName(name) {
+  return (
+    /tts|text-to-speech/.test(name) &&
+    /wasm|web-assembly|webassembly/.test(name) &&
+    /zh|chinese|aishell|melo|kokoro|cantonese|zipvoice/.test(name)
+  );
+}
+
+// 自动发现：作者枚举 + 全站搜索合并候选，按偏好逐个探测文件是否齐全。
 async function discoverSpace() {
-  const authors = ["k2-fsa", "csukuangfj"];
-  const candidates = [];
-  for (const author of authors) {
+  const sourcesUrls = [
+    "https://huggingface.co/api/spaces?author=k2-fsa&limit=200",
+    "https://huggingface.co/api/spaces?author=csukuangfj&limit=200",
+    "https://huggingface.co/api/spaces?search=sherpa-onnx%20wasm%20tts&limit=100",
+    "https://huggingface.co/api/spaces?search=web-assembly%20tts%20sherpa&limit=100",
+  ];
+  const seen = new Map();
+  for (const url of sourcesUrls) {
     try {
-      const spaces = await fetchJson(`https://huggingface.co/api/spaces?author=${author}&limit=200`);
+      const spaces = await fetchJson(url);
       if (!Array.isArray(spaces)) continue;
       for (const item of spaces) {
         const id = item?.id || "";
         const name = id.toLowerCase();
-        if (!/tts|text-to-speech/.test(name)) continue;
-        if (!/wasm|web-assembly|webassembly/.test(name)) continue;
-        if (!/zh|chinese|aishell|melo|kokoro|cantonese/.test(name)) continue;
-        // 偏好多说话人小模型：aishell3 > kokoro > 其它中文。
-        const score = /aishell/.test(name) ? 3 : /kokoro/.test(name) ? 2 : 1;
-        candidates.push({ id, score });
+        if (!id || seen.has(id) || !isCandidateSpaceName(name)) continue;
+        seen.set(id, { id, score: scoreSpaceName(name) });
       }
     } catch (error) {
-      process.stderr.write(`枚举 ${author} 的空间失败：${error.message}\n`);
+      process.stderr.write(`枚举 ${url} 失败：${error.message}\n`);
     }
   }
-  candidates.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
-  process.stderr.write(`候选空间：${candidates.map((c) => c.id).join(", ") || "无"}\n`);
+  const candidates = [...seen.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  process.stderr.write(`候选空间：${candidates.map((c) => `${c.id}(${c.score})`).join(", ") || "无"}\n`);
   for (const candidate of candidates) {
     try {
       const paths = await listSpaceRuntimePaths(candidate.id);

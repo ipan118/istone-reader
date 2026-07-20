@@ -5,8 +5,13 @@
 //   sherpa-onnx-wasm-main*.js    —— Emscripten 胶水
 //   sherpa-onnx-wasm-main*.wasm  —— 运行时
 //   sherpa-onnx-wasm-main*.data  —— file_packager 打进的模型文件
-// 本 Worker 在 init 时拿到全部文件的 blob URL，用 Module.locateFile 把胶水
-// 对 .wasm/.data 的相对路径请求重定向到 blob URL，然后 createOfflineTts。
+//
+// 兼容两代构建：
+//   · 经典构建：全局 Module + onRuntimeInitialized；
+//   · ES Module 构建（MODULARIZE + EXPORT_ES6，新版默认）：`export default 工厂`。
+//     经典 Worker 不能 importScripts ES 模块，因此先把脚本文本做保守归一化
+//     （剥 export 前缀、把 import.meta.url 换成 self.location.href），再以
+//     blob 方式 importScripts；工厂存在时 `await 工厂({locateFile})` 取实例。
 //
 // 音色映射：manifest.voices[].sid 指定 sherpa-onnx 的说话人 id（多说话人
 // 模型如 AISHELL-3 用 sid 区分男声/女声）。
@@ -26,6 +31,78 @@ function postError(message, id) {
   postMessage({ type: "error", id: id || undefined, message: String(message || "unknown-error") });
 }
 
+// 把 ES Module 脚本归一化成经典脚本（保守文本变换，只动模块语法本身）。
+function normalizeModuleScript(source) {
+  return source
+    .replace(/\bimport\.meta\.url\b/g, "self.location.href")
+    .replace(/^\s*export\s*\{\s*([A-Za-z_$][\w$]*)\s+as\s+default\s*\}\s*;?\s*$/m, "self.__sherpaModuleFactory = $1;")
+    .replace(/^\s*export\s+default\s+/m, "self.__sherpaModuleFactory = ")
+    .replace(/^\s*export\s*\{[^}]*\}\s*;?\s*$/gm, "")
+    .replace(/^(\s*)export\s+(async\s+function|function|class|const|let|var)\b/gm, "$1$2");
+}
+
+async function importScriptNormalized(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`加载脚本失败：${response.status}`);
+  }
+  const source = await response.text();
+  const isModule = /^\s*export\s/m.test(source) || /\bimport\.meta\b/.test(source);
+  const finalSource = isModule ? normalizeModuleScript(source) : source;
+  const blobUrl = URL.createObjectURL(new Blob([finalSource], { type: "text/javascript" }));
+  try {
+    importScripts(blobUrl);
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+
+async function initEngine(files) {
+  const api = findFile(files, /(^|\/)sherpa-onnx-tts\.js$/);
+  const glue = findFile(files, /(^|\/)sherpa-onnx-wasm-main[^/]*\.js$/);
+  if (!api || !glue) {
+    throw new Error("语音包缺少 sherpa-onnx 运行时文件。");
+  }
+
+  const locateFile = (path) => {
+    const base = String(path).split("/").pop();
+    const match = Object.keys(files).find((key) => key === path || key.split("/").pop() === base);
+    return match ? files[match] : path;
+  };
+
+  // 经典构建在 importScripts 时读取全局 Module；先备好。
+  const classicReady = new Promise((resolve, reject) => {
+    self.Module = {
+      locateFile,
+      print: () => {},
+      printErr: () => {},
+      onRuntimeInitialized: () => resolve(self.Module),
+      onAbort: (reason) => reject(new Error(`引擎中止：${reason}`)),
+    };
+  });
+
+  await importScriptNormalized(api.url);
+  await importScriptNormalized(glue.url);
+
+  let moduleInstance;
+  if (typeof self.__sherpaModuleFactory === "function") {
+    // ES Module 构建：工厂 resolve 时运行时与 .data 均已就绪。
+    moduleInstance = await self.__sherpaModuleFactory({
+      locateFile,
+      print: () => {},
+      printErr: () => {},
+    });
+  } else {
+    moduleInstance = await classicReady;
+  }
+
+  /* global createOfflineTts */
+  if (typeof createOfflineTts !== "function") {
+    throw new Error("运行时里没有 createOfflineTts 接口。");
+  }
+  return createOfflineTts(moduleInstance);
+}
+
 onmessage = (event) => {
   const message = event.data || {};
 
@@ -35,39 +112,12 @@ onmessage = (event) => {
       return;
     }
     manifest = message.manifest || null;
-    const files = message.files || {};
-    const api = findFile(files, /(^|\/)sherpa-onnx-tts\.js$/);
-    const glue = findFile(files, /(^|\/)sherpa-onnx-wasm-main[^/]*\.js$/);
-    if (!api || !glue) {
-      postError("语音包缺少 sherpa-onnx 运行时文件。");
-      return;
-    }
-    try {
-      self.Module = {
-        // 胶水与 file_packager 按相对文件名请求 .wasm/.data —— 全部重定向到
-        // 包内文件的 blob URL；未知路径原样返回（会 404，便于暴露缺文件）。
-        locateFile: (path) => {
-          const base = String(path).split("/").pop();
-          const match = Object.keys(files).find((key) => key === path || key.split("/").pop() === base);
-          return match ? files[match] : path;
-        },
-        print: () => {},
-        printErr: () => {},
-        onRuntimeInitialized: () => {
-          try {
-            /* global createOfflineTts */
-            tts = createOfflineTts(self.Module);
-            postMessage({ type: "ready" });
-          } catch (error) {
-            postError(`引擎初始化失败：${error?.message || error}`);
-          }
-        },
-        onAbort: (reason) => postError(`引擎中止：${reason}`),
-      };
-      importScripts(api.url, glue.url);
-    } catch (error) {
-      postError(`引擎加载失败：${error?.message || error}`);
-    }
+    initEngine(message.files || {})
+      .then((engine) => {
+        tts = engine;
+        postMessage({ type: "ready" });
+      })
+      .catch((error) => postError(`引擎初始化失败：${error?.message || error}`));
     return;
   }
 
