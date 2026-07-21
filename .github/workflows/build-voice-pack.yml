@@ -1,13 +1,13 @@
 name: Build voice pack
 
-# 手动触发：下载 sherpa-onnx WASM 中文 TTS 构建 → 扫描说话人挑男/女声 →
-# 组装 istone-voice-pack (.zip) → 无头浏览器全链路验证 → 上传产物 /
-# 可选发布为 GitHub Release（用户下载后在应用里「导入语音包」即可）。
+# 手动触发：发现候选 sherpa-onnx WASM 中文 TTS 空间 → 逐个下载 → 扫描说话人
+# （跳过输出静音/NaN 的坏模型）→ 组装 istone-voice-pack (.zip) → 无头浏览器
+# 全链路验证 → 上传产物（含试听样本 WAV）/ 可选发布 Release。
 on:
   workflow_dispatch:
     inputs:
       source_space:
-        description: "上游来源：auto = 自动发现 k2-fsa/csukuangfj 的中文 WASM TTS 空间；也可填具体空间 ID"
+        description: "上游来源：auto = 逐个尝试候选空间取第一个能出声的；也可填具体空间 ID"
         required: true
         default: "auto"
       pack_id:
@@ -33,7 +33,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -47,37 +47,64 @@ jobs:
           npm install playwright >/dev/null
           npx playwright install --with-deps chromium
 
-      - name: Download upstream runtime
+      - name: Build voice pack (try candidates until one produces audio)
+        env:
+          SOURCE_SPACE: ${{ inputs.source_space }}
+          PACK_ID: ${{ inputs.pack_id }}
+          PACK_LABEL: ${{ inputs.pack_label }}
+          MAX_SID: ${{ inputs.max_sid }}
         run: |
-          node scripts/build-voice-pack.mjs --source "${{ inputs.source_space }}" --fetch-to dist/runtime
-          ls -lh dist/runtime
+          set -u
+          mkdir -p dist
+          if [ "$SOURCE_SPACE" = "auto" ]; then
+            node scripts/build-voice-pack.mjs --list-candidates > dist/candidates.txt
+          else
+            echo "$SOURCE_SPACE" > dist/candidates.txt
+          fi
+          echo "候选空间："; cat dist/candidates.txt
 
-      - name: Scan speakers (pick male/female by F0)
-        run: node scripts/voice-pack-lab.cjs scan --runtime dist/runtime --max-sid "${{ inputs.max_sid }}" --out dist/voices.json
+          PACK_OK=0
+          while IFS= read -r SPACE; do
+            [ -z "$SPACE" ] && continue
+            echo "::group::尝试 $SPACE"
+            rm -rf dist/runtime && mkdir -p dist/runtime
+            if ! node scripts/build-voice-pack.mjs --source "$SPACE" --fetch-to dist/runtime; then
+              echo "下载失败，跳过 $SPACE"; echo "::endgroup::"; continue
+            fi
+            if ! node scripts/voice-pack-lab.cjs scan --runtime dist/runtime --max-sid "$MAX_SID" --out dist/voices.json; then
+              echo "该模型无可用说话人（静音/NaN），跳过 $SPACE"; echo "::endgroup::"; continue
+            fi
+            if ! node scripts/build-voice-pack.mjs --source dist/runtime --out "dist/${PACK_ID}.zip" --id "$PACK_ID" --label "$PACK_LABEL" --voices dist/voices.json; then
+              echo "组装失败，跳过 $SPACE"; echo "::endgroup::"; continue
+            fi
+            if ! node scripts/voice-pack-lab.cjs verify --pack "dist/${PACK_ID}.zip"; then
+              echo "验证失败，跳过 $SPACE"; echo "::endgroup::"; continue
+            fi
+            echo "成功：$SPACE"; echo "$SPACE" > dist/chosen-space.txt
+            PACK_OK=1; echo "::endgroup::"; break
+          done < dist/candidates.txt
 
-      - name: Assemble pack
-        run: |
-          node scripts/build-voice-pack.mjs \
-            --source dist/runtime \
-            --out "dist/${{ inputs.pack_id }}.zip" \
-            --id "${{ inputs.pack_id }}" \
-            --label "${{ inputs.pack_label }}" \
-            --voices dist/voices.json
-
-      - name: Verify pack end-to-end
-        run: node scripts/voice-pack-lab.cjs verify --pack "dist/${{ inputs.pack_id }}.zip"
+          if [ "$PACK_OK" != "1" ]; then
+            echo "所有候选空间都没有产出可用语音包（多为上游模型输出静音）。请查看上传的试听样本 WAV 与日志。"
+            exit 1
+          fi
 
       - name: Upload artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: voice-pack
           path: |
-            dist/${{ inputs.pack_id }}.zip
-            dist/${{ inputs.pack_id }}.zip.sha256
+            dist/*.zip
+            dist/*.zip.sha256
             dist/voices.json
+            dist/candidates.txt
+            dist/chosen-space.txt
+            dist/sample-*.wav
+          if-no-files-found: warn
 
       - name: Publish release
-        if: inputs.release_tag != ''
+        if: success() && inputs.release_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
