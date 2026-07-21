@@ -136,11 +136,15 @@ onmessage = (event) => {
     const speed = Math.min(3, Math.max(0.5, Number(message.speed) > 0 ? Number(message.speed) : 1));
     try {
       const result = tts.generate({ text, sid, speed });
-      const samples = result?.samples instanceof Float32Array ? result.samples : new Float32Array(0);
-      if (!samples.length || !(result?.sampleRate > 0)) {
+      const source = result?.samples instanceof Float32Array ? result.samples : null;
+      if (!source || !source.length || !(result?.sampleRate > 0)) {
         postError("引擎没有产出音频。", message.id);
         return;
       }
+      // 拷贝成独立缓冲后再 transfer：sherpa 返回的常是 WASM 堆的子视图，直接
+      // transfer 它的 buffer 会把整块引擎堆 detach 掉，后续合成即报 detached。
+      const samples = new Float32Array(source.length);
+      samples.set(source);
       postMessage(
         { type: "audio", id: message.id, sampleRate: result.sampleRate, samples },
         [samples.buffer],

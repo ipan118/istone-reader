@@ -41,9 +41,12 @@ function parseArgs(argv) {
     else if (key === "--label") args.label = argv[++i];
     else if (key === "--voices") args.voices = argv[++i];
     else if (key === "--fetch-to") args.fetchTo = argv[++i];
+    else if (key === "--list-candidates") args.listCandidates = true;
     else throw new Error(`未知参数：${key}`);
   }
-  if (!args.source) throw new Error("必须提供 --source（本地目录、HF 空间 ID 或 auto）");
+  if (!args.listCandidates && !args.source) {
+    throw new Error("必须提供 --source（本地目录、HF 空间 ID 或 auto）");
+  }
   return args;
 }
 
@@ -88,13 +91,14 @@ function isCandidateSpaceName(name) {
   );
 }
 
-// 自动发现：作者枚举 + 全站搜索合并候选，按偏好逐个探测文件是否齐全。
-async function discoverSpace() {
+// 枚举候选空间（作者枚举 + 全站搜索），按偏好排序，不做完整性探测。
+async function rankCandidateSpaces() {
   const sourcesUrls = [
     "https://huggingface.co/api/spaces?author=k2-fsa&limit=200",
     "https://huggingface.co/api/spaces?author=csukuangfj&limit=200",
     "https://huggingface.co/api/spaces?search=sherpa-onnx%20wasm%20tts&limit=100",
     "https://huggingface.co/api/spaces?search=web-assembly%20tts%20sherpa&limit=100",
+    "https://huggingface.co/api/spaces?search=vits%20chinese%20wasm&limit=100",
   ];
   const seen = new Map();
   for (const url of sourcesUrls) {
@@ -111,21 +115,37 @@ async function discoverSpace() {
       process.stderr.write(`枚举 ${url} 失败：${error.message}\n`);
     }
   }
-  const candidates = [...seen.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+  return [...seen.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+}
+
+// 列出运行时文件齐全的候选空间 id（供工作流逐个试听后择优）。
+async function listCompleteCandidates() {
+  const candidates = await rankCandidateSpaces();
   process.stderr.write(`候选空间：${candidates.map((c) => `${c.id}(${c.score})`).join(", ") || "无"}\n`);
+  const complete = [];
   for (const candidate of candidates) {
     try {
       const paths = await listSpaceRuntimePaths(candidate.id);
       if (runtimePathsComplete(paths)) {
-        process.stderr.write(`选用空间：${candidate.id}\n`);
-        return { space: candidate.id, paths };
+        complete.push(candidate.id);
+      } else {
+        process.stderr.write(`跳过 ${candidate.id}：运行时文件不齐\n`);
       }
-      process.stderr.write(`跳过 ${candidate.id}：运行时文件不齐（${paths.join(", ") || "无匹配"}）\n`);
     } catch (error) {
       process.stderr.write(`跳过 ${candidate.id}：${error.message}\n`);
     }
   }
-  throw new Error("自动发现失败：没有找到文件齐全的 sherpa-onnx wasm 中文 TTS 空间");
+  return complete;
+}
+
+// 自动发现：取第一个运行时文件齐全的候选。
+async function discoverSpace() {
+  const complete = await listCompleteCandidates();
+  if (!complete.length) {
+    throw new Error("自动发现失败：没有找到文件齐全的 sherpa-onnx wasm 中文 TTS 空间");
+  }
+  process.stderr.write(`选用空间：${complete[0]}\n`);
+  return { space: complete[0], paths: await listSpaceRuntimePaths(complete[0]) };
 }
 
 async function collectRuntimeFiles(source) {
@@ -237,6 +257,17 @@ function buildZip(entries) {
 
 async function main() {
   const args = parseArgs(process.argv);
+
+  if (args.listCandidates) {
+    const complete = await listCompleteCandidates();
+    if (!complete.length) {
+      throw new Error("没有文件齐全的候选空间");
+    }
+    // stdout 仅输出 id（每行一个），供工作流逐个尝试。
+    process.stdout.write(`${complete.join("\n")}\n`);
+    return;
+  }
+
   const voices = args.voices ? JSON.parse(readFileSync(resolve(args.voices), "utf8")) : DEFAULT_VOICES;
   if (!Array.isArray(voices) || !voices.length) throw new Error("--voices 必须是非空数组");
 

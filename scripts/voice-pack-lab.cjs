@@ -162,6 +162,40 @@ const DRIVER_SNIPPET = `
     });
     window.__worker.postMessage({ type: "synthesize", id, text, voiceId, speed: 1 });
   });
+
+  // 合成一句并编码为 16-bit WAV，返回 base64（供保存试听样本）。
+  window.__synthWav = (voiceId, text) => new Promise((resolve, reject) => {
+    const id = "wav-" + (__seq += 1);
+    const timer = setTimeout(() => { __pending.delete(id); reject(new Error("synthesize timeout")); }, 180000);
+    __pending.set(id, {
+      timer,
+      reject,
+      resolve: (m) => {
+        const samples = m.samples instanceof Float32Array ? m.samples : new Float32Array(m.samples.buffer);
+        const rate = m.sampleRate;
+        const pcm = new Int16Array(samples.length);
+        for (let i = 0; i < samples.length; i += 1) {
+          const v = Math.max(-1, Math.min(1, samples[i] || 0));
+          pcm[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+        }
+        const header = new ArrayBuffer(44);
+        const view = new DataView(header);
+        const bytes = pcm.length * 2;
+        const put = (off, str) => { for (let i = 0; i < str.length; i += 1) view.setUint8(off + i, str.charCodeAt(i)); };
+        put(0, "RIFF"); view.setUint32(4, 36 + bytes, true); put(8, "WAVE"); put(12, "fmt ");
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, rate, true); view.setUint32(28, rate * 2, true);
+        view.setUint16(32, 2, true); view.setUint16(34, 16, true); put(36, "data"); view.setUint32(40, bytes, true);
+        const wav = new Uint8Array(44 + bytes);
+        wav.set(new Uint8Array(header), 0);
+        wav.set(new Uint8Array(pcm.buffer), 44);
+        let binary = "";
+        for (let i = 0; i < wav.length; i += 1) binary += String.fromCharCode(wav[i]);
+        resolve(btoa(binary));
+      },
+    });
+    window.__worker.postMessage({ type: "synthesize", id, text, voiceId, speed: 1 });
+  });
 `;
 
 async function commandScan(args) {
@@ -199,6 +233,9 @@ async function commandScan(args) {
     console.error("引擎已就绪，开始扫描说话人……");
 
     const rows = [];
+    let sampleSaved = 0;
+    const outDir = path.dirname(path.resolve(args.out || "dist/voices.json"));
+    fs.mkdirSync(outDir, { recursive: true });
     for (let sid = 0; sid <= args.maxSid; sid += 1) {
       try {
         const stats = await page.evaluate(
@@ -209,6 +246,16 @@ async function commandScan(args) {
         console.error(
           `sid=${sid} F0≈${stats.pitch}Hz 浊音占比=${stats.voicedRatio} 响度=${stats.rms} 时长=${stats.seconds}s 合成=${stats.synthMs}ms`,
         );
+        // 保存前几个能出声说话人的样本 WAV，供人工试听判断音质/是否静音。
+        if (stats.rms >= 0.01 && sampleSaved < 4) {
+          const wavBase64 = await page.evaluate(
+            ({ voiceId, text }) => window.__synthWav(voiceId, text),
+            { voiceId: `sid-${sid}`, text: "这是 iStone Reader 的语音包试听。旧书架的第三层放着一本没有署名的诗集。" },
+          );
+          fs.writeFileSync(path.join(outDir, `sample-sid-${sid}.wav`), Buffer.from(wavBase64, "base64"));
+          console.error(`已保存试听样本 sample-sid-${sid}.wav`);
+          sampleSaved += 1;
+        }
       } catch (error) {
         console.error(`sid=${sid} 失败：${error?.message || error}`);
       }
