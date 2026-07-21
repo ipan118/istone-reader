@@ -15,7 +15,7 @@ const path = require("node:path");
 const http = require("node:http");
 
 const ROOT = path.resolve(__dirname, "..");
-const SCAN_TEXT = "今天的天气很好，我们出门去公园散步吧。";
+const SCAN_TEXT = "今天的天气很好。";
 const VERIFY_TEXT = "旧书架的第三层放着一本没有署名的诗集。";
 const MIME = {
   ".html": "text/html", ".css": "text/css", ".js": "text/javascript", ".mjs": "text/javascript",
@@ -96,29 +96,46 @@ const DRIVER_SNIPPET = `
     };
   };
 
-  // 自相关基频估计（80–400Hz 搜索窗，取中位数），足以区分男女声。
+  // 基频估计：逐帧去直流 + 归一化互相关（80–400Hz 搜索窗），对真实语音有效；
+  // 取浊音帧的中位数，另报浊音帧占比用于诊断。
   function estimatePitch(samples, sampleRate) {
     const frame = Math.floor(sampleRate * 0.04);
     const hop = Math.floor(sampleRate * 0.02);
     const minLag = Math.floor(sampleRate / 400);
     const maxLag = Math.floor(sampleRate / 80);
+    let total = 0;
+    for (let i = 0; i < samples.length; i += 1) total += samples[i] * samples[i];
+    const clipRms = Math.sqrt(total / Math.max(1, samples.length));
+    const gate = Math.max(1e-5, clipRms * 0.2);
     const pitches = [];
+    let frames = 0;
     for (let start = 0; start + frame + maxLag < samples.length; start += hop) {
-      let energy = 0;
-      for (let i = 0; i < frame; i += 1) energy += samples[start + i] * samples[start + i];
-      if (energy / frame < 1e-4) continue;
+      frames += 1;
+      let mean = 0;
+      for (let i = 0; i < frame; i += 1) mean += samples[start + i];
+      mean /= frame;
+      let e0 = 0;
+      for (let i = 0; i < frame; i += 1) { const v = samples[start + i] - mean; e0 += v * v; }
+      if (Math.sqrt(e0 / frame) < gate) continue;
       let bestLag = 0;
-      let bestScore = 0;
+      let bestR = 0;
       for (let lag = minLag; lag <= maxLag; lag += 1) {
-        let score = 0;
-        for (let i = 0; i < frame; i += 1) score += samples[start + i] * samples[start + i + lag];
-        if (score > bestScore) { bestScore = score; bestLag = lag; }
+        let num = 0;
+        let e1 = 0;
+        for (let i = 0; i < frame; i += 1) {
+          const a = samples[start + i] - mean;
+          const b = samples[start + i + lag] - mean;
+          num += a * b;
+          e1 += b * b;
+        }
+        const r = num / Math.sqrt(e0 * e1 + 1e-12);
+        if (r > bestR) { bestR = r; bestLag = lag; }
       }
-      if (bestLag > 0 && bestScore / energy > 0.5) pitches.push(sampleRate / bestLag);
+      if (bestLag > 0 && bestR > 0.5) pitches.push(sampleRate / bestLag);
     }
-    if (!pitches.length) return 0;
+    if (!pitches.length) return { pitch: 0, voicedRatio: 0 };
     pitches.sort((a, b) => a - b);
-    return pitches[Math.floor(pitches.length / 2)];
+    return { pitch: pitches[Math.floor(pitches.length / 2)], voicedRatio: pitches.length / Math.max(1, frames) };
   }
 
   window.__synthStats = (voiceId, text) => new Promise((resolve, reject) => {
@@ -132,10 +149,12 @@ const DRIVER_SNIPPET = `
         const samples = m.samples instanceof Float32Array ? m.samples : new Float32Array(m.samples.buffer);
         let sumSquares = 0;
         for (let i = 0; i < samples.length; i += 1) sumSquares += samples[i] * samples[i];
+        const f0 = estimatePitch(samples, m.sampleRate);
         resolve({
           seconds: Number((samples.length / m.sampleRate).toFixed(2)),
           rms: Number(Math.sqrt(sumSquares / Math.max(1, samples.length)).toFixed(4)),
-          pitch: Math.round(estimatePitch(samples, m.sampleRate)),
+          pitch: Math.round(f0.pitch),
+          voicedRatio: Number(f0.voicedRatio.toFixed(2)),
           sampleRate: m.sampleRate,
           synthMs: Math.round(performance.now() - started),
         });
@@ -187,20 +206,38 @@ async function commandScan(args) {
           { voiceId: `sid-${sid}`, text: SCAN_TEXT },
         );
         rows.push({ sid, ...stats });
-        console.error(`sid=${sid} F0≈${stats.pitch}Hz 时长=${stats.seconds}s 合成=${stats.synthMs}ms`);
+        console.error(
+          `sid=${sid} F0≈${stats.pitch}Hz 浊音占比=${stats.voicedRatio} 响度=${stats.rms} 时长=${stats.seconds}s 合成=${stats.synthMs}ms`,
+        );
       } catch (error) {
         console.error(`sid=${sid} 失败：${error?.message || error}`);
       }
     }
     if (!rows.length) throw new Error("没有任何说话人合成成功");
 
-    const bySpeed = rows.filter((row) => row.pitch > 0 && row.rms >= 0.01).sort((a, b) => a.pitch - b.pitch);
-    const males = bySpeed.filter((row) => row.pitch < 165).slice(0, 2);
-    const females = bySpeed.filter((row) => row.pitch >= 165).slice(-2).reverse();
-    const suggestion = [
+    const byPitch = rows.filter((row) => row.pitch > 0 && row.rms >= 0.01).sort((a, b) => a.pitch - b.pitch);
+    const males = byPitch.filter((row) => row.pitch < 165).slice(0, 2);
+    const females = byPitch.filter((row) => row.pitch >= 165).slice(-2).reverse();
+    let suggestion = [
       ...males.map((row, index) => ({ id: `male-${index + 1}`, name: `${index ? "男声二" : "男声一"} · 沉稳`, lang: "zh-CN", sid: row.sid })),
       ...females.map((row, index) => ({ id: `female-${index + 1}`, name: `${index ? "女声二" : "女声一"} · 清亮`, lang: "zh-CN", sid: row.sid })),
     ];
+    if (!suggestion.length) {
+      // 分类兜底：基频不可用时，从合成成功的说话人里均匀取 4 个（听感自选）。
+      const usable = rows.filter((row) => row.rms >= 0.01);
+      const labels = ["音色一", "音色二", "音色三", "音色四"];
+      const picks = [...new Set([0, Math.floor(usable.length / 3), Math.floor((usable.length * 2) / 3), usable.length - 1])]
+        .filter((index) => index >= 0 && index < usable.length)
+        .slice(0, 4);
+      suggestion = picks.map((index, order) => ({
+        id: `voice-${order + 1}`,
+        name: labels[order],
+        lang: "zh-CN",
+        sid: usable[index].sid,
+      }));
+      console.error("基频分类失败，回退为均匀选取 4 个说话人（名称为通用音色，可试听后调整 sid 重打包）");
+    }
+    if (!suggestion.length) throw new Error("没有可用的说话人（全部近乎无声）");
     const output = args.out || "dist/voices.json";
     fs.mkdirSync(path.dirname(path.resolve(output)), { recursive: true });
     fs.writeFileSync(output, JSON.stringify(suggestion, null, 2));
