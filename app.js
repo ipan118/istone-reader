@@ -44,12 +44,13 @@ import {
   isNeuralVoiceURI,
   synthesizeNeuralSpeech,
 } from "./neural-voice.js";
+import { initI18n, setLang, getLang, t } from "./i18n.js";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL("./vendor/pdf.worker.min.mjs", import.meta.url).toString();
 
 // Visible build tag — keep in sync with CACHE_NAME in sw.js. Shown in the
 // hero badge so a phone screenshot immediately reveals which build is live.
-const APP_VERSION = "v44";
+const APP_VERSION = "v45";
 const SETTINGS_KEY = "vivid-reader-settings-v2";
 const OCR_ASSET_PATHS = {
   workerPath: new URL("./vendor/tesseract/worker.min.js", import.meta.url).toString(),
@@ -275,6 +276,7 @@ const dom = {
   tabShelf: document.getElementById("tab-shelf"),
   tabImport: document.getElementById("tab-import"),
   tabListening: document.getElementById("tab-listening"),
+  langToggle: document.getElementById("lang-toggle"),
   loadDemoButton: document.getElementById("load-demo-button"),
   voiceSelect: document.getElementById("voice-select"),
   voiceStyleSelect: document.getElementById("voice-style-select"),
@@ -370,6 +372,9 @@ function beginBookLoad() {
 }
 
 async function bootstrap() {
+  // Localize the static UI first; dynamic setters below then override specific
+  // elements with live values in the chosen language.
+  initI18n();
   prepareToneControls();
   applyBrandCopy();
   hydrateSettings();
@@ -481,21 +486,14 @@ function registerVisibilityRecovery() {
 function applyBrandCopy() {
   document.title = "iStone Reader";
   const brandBadge = document.querySelector(".brand-badge");
-  const eyebrow = document.querySelector(".hero-copy .eyebrow");
   const heroTitle = document.querySelector(".hero-copy h1");
-  const toneCaption = document.querySelector(".studio-block .block-heading span");
 
   if (brandBadge) {
     brandBadge.textContent = `iStone Reader ${APP_VERSION}`;
   }
-  if (eyebrow) {
-    eyebrow.textContent = "简单方便的听读体验";
-  }
+  // eyebrow / heroTitle / toneCaption text is localized via data-i18n now.
   if (heroTitle) {
     heroTitle.textContent = "iStone Reader";
-  }
-  if (toneCaption) {
-    toneCaption.textContent = "快速切换配色";
   }
 
   if (dom.rateRange) {
@@ -520,7 +518,7 @@ function prepareToneControls() {
       return;
     }
     button.dataset.tonePreset = preset.key;
-    button.textContent = preset.label;
+    // Label text is localized via data-i18n (tone.dark / tone.light).
   });
 
   dom.tonePresetButtons = [...document.querySelectorAll("[data-tone-preset]")];
@@ -568,6 +566,17 @@ function wireEvents() {
   });
   dom.tabImport?.addEventListener("click", () => {
     dom.fileInput?.click();
+  });
+
+  dom.langToggle?.addEventListener("click", () => {
+    setLang(getLang() === "zh" ? "en" : "zh");
+    // Re-render the parts app.js controls so they follow the new language too.
+    refreshToneControls();
+    refreshVoiceHint();
+    renderSpeechDiagnostics();
+    if (state.book) {
+      renderBookMeta();
+    }
   });
 
   dom.neuralPackInput?.addEventListener("change", async (event) => {
@@ -931,17 +940,16 @@ function refreshSpeechControls() {
 function renderSpeechDiagnostics(title, text, stateName = "idle") {
   const fallback = getPlatformSpeechChecks();
   dom.speechDiagnostic.dataset.state = stateName;
-  dom.speechDiagnosticTitle.textContent = title || "朗读自检：待测试";
+  dom.speechDiagnosticTitle.textContent = title || t("diag.idle.title");
   dom.speechDiagnosticText.textContent = text || fallback;
 }
 
 function refreshOcrHint() {
   dom.ocrModeSelect.value = state.ocrMode;
   dom.ocrLanguageSelect.value = state.ocrLanguage;
-  const modeText =
-    state.ocrMode === "auto" ? "遇到扫描页时自动识别" : state.ocrMode === "always" ? "所有 PDF 页都强制识别" : "已关闭扫描识别";
-  const langText = `${OCR_LANGUAGE_LABELS[state.ocrLanguage] || "中英混合"}模型`;
-  dom.ocrHelper.textContent = `${modeText}，当前使用 ${langText}。识别引擎和文字模型已内置，离线也可以使用。`;
+  // The current mode/language are shown by the selects above; the helper stays
+  // a stable localized note so it reads correctly in both languages.
+  dom.ocrHelper.textContent = t("scan.helper");
 }
 
 function scheduleVoiceReload() {
@@ -4152,9 +4160,9 @@ function renderNeuralPackList() {
 }
 
 function refreshToneControls() {
-  const preset = TONE_PRESETS[state.tonePreset] || TONE_PRESETS.dark;
-  dom.tonePill.textContent = preset.label;
-  dom.toneHelper.textContent = `当前已切换到 ${preset.label}。现在只保留贴近 Windows 风格的浅色和暗色两套配色。`;
+  const presetLabel = state.tonePreset === "light" ? t("tone.light") : t("tone.dark");
+  dom.tonePill.textContent = presetLabel;
+  dom.toneHelper.textContent = t("tone.helper.applied").replace("{label}", presetLabel);
   dom.tonePresetButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.tonePreset === state.tonePreset);
   });
@@ -4233,7 +4241,7 @@ async function loadVoices(options = {}) {
   if (!voices.length) {
     state.voiceURI = DEFAULT_VOICE_URI;
     dom.voiceSelect.value = DEFAULT_VOICE_URI;
-    dom.voiceReadyPill.textContent = "默认声音可用";
+    dom.voiceReadyPill.textContent = t("voice.pill.default");
     refreshVoiceHint();
     renderSpeechDiagnostics(
       "等待系统语音",
@@ -4267,7 +4275,7 @@ async function loadVoices(options = {}) {
 
   dom.voiceSelect.value = state.voiceURI;
   state.voiceURI = dom.voiceSelect.value || state.voiceURI;
-  dom.voiceReadyPill.textContent = `${voices.length} 种精选语音`;
+  dom.voiceReadyPill.textContent = t("voice.pill.count").replace("{n}", String(voices.length));
   refreshVoiceHint();
   if (!options.quiet) {
     if (voices.length <= 1) {
@@ -4972,6 +4980,14 @@ function stopSpeech(options = {}) {
 function refreshVoiceHint() {
   const allVisibleVoices = state.voices.length ? state.voices : state.allVoices;
   const voice = allVisibleVoices.find((item) => item.voiceURI === state.voiceURI) || null;
+  // English UI keeps a concise offline-note; the detailed Chinese guidance below
+  // is shown only in Chinese (its device tips reference zh TTS engines).
+  if (getLang() === "en") {
+    dom.voiceHint.textContent = voice
+      ? t("voice.hint.selected").replace("{name}", cleanVoiceDisplayName(voice.name) || voice.name || "system")
+      : t("voice.hint");
+    return;
+  }
   const voiceCounts = summarizeVoiceBuckets(allVisibleVoices);
   const englishVoiceHint = voiceCounts.english
     ? `当前列表里有 ${voiceCounts.english} 种英文语音。`
