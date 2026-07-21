@@ -101,3 +101,20 @@ node scripts/voice-pack-lab.cjs verify --pack dist/pack.zip
 
 分发说明：模型体积超出 Vercel 静态托管限制，官方包走 GitHub Releases / 网盘
 分发；应用内以「本地导入」为主通道（中国大陆无需境外直连）。
+
+## 当前状态与后续计划（2026-07）
+
+**框架已上线（v42），语音包作为独立内容后续补充——新增声音无需更新应用。**
+
+- 应用侧的语音包框架、导入/管理 UI、本机合成播放链路均已完成并测试通过，
+  可用于任何符合 format 1 的语音包。
+- 官方包尚未产出：`Build voice pack` 流水线的自动发现目前只能找到两个文件
+  齐全的 sherpa-onnx wasm 空间，均不可用——`jacob-8/web-assembly-tts-sherpa-onnx-en_zh`
+  对全部说话人输出静音（NaN），`k2-fsa/web-assembly-zh-en-tts-zipvoice`
+  是音色克隆式模型（需参考音频，非多说话人）。即公开的现成 wasm 空间里暂时
+  没有干净的中文多说话人模型。
+- 因此当前策略：**先上线现有能力**（系统本机语音 + 4 档离线声音风格），
+  神经语音包作为「进阶 · 可选」入口保留；待拿到可靠模型后，改为从
+  sherpa-onnx 官方 GitHub Release 下载**指定的**已知可用模型（如
+  vits-zh-aishell3）自建打包，产出官方包并发布 Release，用户导入即用。
+- 由于语音包与应用解耦，后续新增/替换语音包都不需要发版更新应用。
