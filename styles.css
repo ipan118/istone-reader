@@ -250,6 +250,23 @@ button {
   margin-left: auto;
 }
 
+/* Language toggle: a compact pill in the hero topline. */
+.lang-toggle {
+  flex: none;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  background: var(--surface-soft);
+  border: 1px solid var(--surface-strong);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.lang-toggle:active {
+  transform: scale(0.96);
+}
+
 .eyebrow,
 .panel-kicker {
   margin: 0 0 4px;
